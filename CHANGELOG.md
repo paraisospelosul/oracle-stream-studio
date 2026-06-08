@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.0] - 2026-06-08
+
+### Added
+- Created Architecture Decision Records (ADRs): `ADR-001` (WebSocket Message Rate Limiting and Size Restrictions), `ADR-002` (SRT Failover Strategy and Advanced Scene Switching), and `ADR-003` (Strict HTTP Security Headers and CORS Policies).
+- Created a `MAINTAINERS.md` file listing core maintainers and outlining the governance/decision process.
+- Upgraded GitHub Actions CI workflow with `golangci-lint` code analysis checks and Codecov integration.
+
 ## [1.6.0] - 2026-06-08
 
 ### Added

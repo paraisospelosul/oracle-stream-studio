@@ -34,17 +34,26 @@ jobs:
         go mod tidy
         git diff --exit-code go.mod go.sum || (echo "go.mod/go.sum not tidy" && exit 1)
 
-    - name: Run vet
-      run: go vet ./...
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v6
+      with:
+        version: v1.59
+        args: --timeout=5m --disable-all --enable=errcheck,gosimple,govet,ineffassign,staticcheck,unused
 
     - name: Run tests with coverage
       run: go test -v -coverprofile=coverage.out -covermode=atomic ./...
 
-    - name: Upload coverage
+    - name: Upload coverage to Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: coverage-report
         path: coverage.out
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        files: ./coverage.out
+        fail_ci_if_error: false
 
     - name: Build binary
       run: go build -v -o oracle-stream-studio .

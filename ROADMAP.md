@@ -13,22 +13,27 @@ This document outlines the planned releases, features, and enhancements for Orac
 - Enforced file upload limits (100MB) and disk space pre-checks (`checkDiskSpace`).
 - Integrated security headers (CSP, X-Frame-Options, X-Content-Type-Options) and audit logs (`[AUDIT]`).
 
-### v1.6.0 (Current)
+### v1.6.0
 - Increased test coverage to >60% (focusing on output manager, switcher state machine, and recorder).
 - Added visual shields/badges to the documentation.
 - Created contributing and roadmap guidelines.
 - Configured CI/CD automated test coverage profiling.
 
+### v1.7.0 (Current)
+- Created Architecture Decision Records (ADRs): `ADR-001` (WebSocket Message Rate Limiting and Size Restrictions), `ADR-002` (SRT Failover Strategy and Advanced Scene Switching), and `ADR-003` (Strict HTTP Security Headers and CORS Policies).
+- Created `MAINTAINERS.md` and updated linter check configurations (`golangci-lint`) in CI.
+- Integrated automated Codecov coverage reports in the workflow.
+
 ---
 
 ## 🗺️ Future Roadmap
 
-### v1.7.0 (Q3 2026)
+### v1.8.0 (Q3 2026)
 - [ ] **Robust WebSocket Reconnection**: Auto-reconnect client panels on disconnection with exponential backoff.
 - [ ] **Advanced Metrics & Observability**: Expose Prometheus endpoints `/metrics` for system health tracking.
 - [ ] **Extended API v2**: Standardized JSON REST API endpoints with API token authentication for remote control.
 
-### v1.8.0 (Q4 2026)
+### v1.9.0 (Q4 2026)
 - [ ] **HLS & WebRTC Low-Latency Previews**: Replace static jpeg preview polling with a low-latency WebRTC/HLS sub-second live view in the dashboard.
 - [ ] **Audio Channel Mapping**: UI routing matrix to map specific audio channels from inputs to distinct RTMP stream output channels.
 
