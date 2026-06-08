@@ -39,7 +39,7 @@ Moblin/externo (H.265) → SRTLA://ip-vps:5000/Bbox → SRT:8282 → SRT → [Or
 ## Instalação rápida (VPS Oracle)
 
 ```bash
-git clone https://github.com/SEU_USUARIO_GITHUB/oracle-stream-studio.git /opt/oracle-stream-studio
+git clone https://github.com/paraisospelosul/oracle-stream-studio.git /opt/oracle-stream-studio
 cd /opt/oracle-stream-studio
 bash scripts/install.sh
 ```

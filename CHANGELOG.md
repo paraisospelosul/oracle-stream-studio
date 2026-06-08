@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.0] - 2026-06-08
+
+### Changed
+- Replaced the generic `SEU_USUARIO_GITHUB` placeholder in `README.md` with the user's actual GitHub username (`paraisospelosul`) in the Git clone instructions.
+
 ## [1.8.0] - 2026-06-08
 
 ### Added
