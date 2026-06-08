@@ -1,0 +1,15 @@
+{
+  "outputs": [
+    {
+      "id": "out_youtube",
+      "name": "YouTube",
+      "url": "rtmp://a.rtmp.youtube.com/live2",
+      "stream_key": "key",
+      "codec": "h265",
+      "bitrate": 0,
+      "preset": "",
+      "enabled": false,
+      "overlay_enabled": false
+    }
+  ]
+}

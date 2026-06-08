@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Oracle Stream Studio Premium Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.iife.min.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="grid-background"></div>
+    <div class="container">
+        <header class="header">
+            <div class="logo">
+                <h1>Oracle Stream Studio 🧪</h1>
+                <div class="system-stats">
+                    <span class="cpu-badge">CPU: <strong id="stat-cpu">0%</strong></span>
+                    <div>RAM: <strong id="sys-ram">0 MB</strong></div>
+                </div>
+            </div>
+            <div class="header-actions">
+                <div class="connection-status" id="ws-status">
+                    <span class="indicator pulsing"></span>
+                    <span class="text">Connecting...</span>
+                </div>
+                <button class="btn btn-rec" id="btn-rec">⏺ REC</button>
+                <span class="rec-indicator" id="rec-status" style="display:none;"></span>
+                <button class="btn btn-secondary btn-sm" id="btn-show-recordings">🎥 Recs</button>
+                <button class="btn btn-secondary btn-sm" id="btn-open-assets">⬆ Assets</button>
+            </div>
+        </header>
+
+        <main>
+            <!-- Outputs -->
+            <section class="outputs-section">
+                <div class="section-header">
+                    <h2>Output Destinations</h2>
+                    <button class="btn btn-primary btn-sm" id="btn-add-output">+ Add Output</button>
+                </div>
+                <div class="outputs-grid" id="outputs-container">
+                    <div class="empty-state"><p>No outputs configured.</p></div>
+                </div>
+            </section>
+
+            <!-- Preview -->
+            <section class="preview-section">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Live Preview</h2>
+                        <div class="preview-controls">
+                            <select id="preview-fps" class="select-sm">
+                                <option value="0">Off</option>
+                                <option value="1">1 fps</option>
+                                <option value="2" selected>2 fps</option>
+                                <option value="5">5 fps</option>
+                                <option value="10">10 fps</option>
+                                <option value="15">15 fps</option>
+                                <option value="30">30 fps</option>
+                            </select>
+                            <select id="preview-res" class="select-sm">
+                                <option value="320x180">320p</option>
+                                <option value="640x360" selected>360p</option>
+                                <option value="854x480">480p</option>
+                                <option value="1280x720">720p</option>
+                            </select>
+                            <button class="btn btn-sm btn-secondary" id="btn-apply-preview">Apply</button>
+                            <select id="preview-overlay-output" class="select-sm" disabled>
+                                <option value="">Select Output for Overlay...</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="preview-container" style="position:relative; cursor:crosshair;">
+                        <img id="preview-snapshot" alt="Preview" style="width:100%;height:100%;object-fit:contain;background:#000; pointer-events:none;">
+                        <div id="preview-overlay-box" class="draggable-overlay" style="display:none;">
+                            <span class="overlay-label">Watermark</span>
+                            <span class="overlay-coords">10, 10</span>
+                        </div>
+                    </div>
+                    <div class="layout-presets" id="layout-presets-bar" style="display:none; gap:0.4rem; padding:0.6rem; justify-content:center; background:rgba(0,0,0,0.3); border-top:1px solid var(--border-color);">
+                        <button class="btn btn-xs btn-secondary btn-layout-preset" data-x="10" data-y="10">↖ Top L</button>
+                        <button class="btn btn-xs btn-secondary btn-layout-preset" data-x="1790" data-y="10">↗ Top R</button>
+                        <button class="btn btn-xs btn-secondary btn-layout-preset" data-x="900" data-y="515">🎯 Center</button>
+                        <button class="btn btn-xs btn-secondary btn-layout-preset" data-x="10" data-y="1020">↙ Bot L</button>
+                        <button class="btn btn-xs btn-secondary btn-layout-preset" data-x="1790" data-y="1020">↘ Bot R</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Input Status -->
+            <section class="status-section">
+                <div class="card" id="switcher-card">
+                    <div class="card-header">
+                        <h2>Input Status</h2>
+                        <div class="status-badge" id="main-status-badge" data-state="fallback">FALLBACK</div>
+                    </div>
+                    <div class="stats-grid">
+                        <div class="stat-box"><span class="stat-label">Input Bitrate</span><span class="stat-value" id="stat-bitrate">0.00 <small>Mbps</small></span></div>
+                        <div class="stat-box"><span class="stat-label">Uptime</span><span class="stat-value" id="stat-uptime">—</span></div>
+                        <div class="stat-box"><span class="stat-label">Packets RX</span><span class="stat-value" id="stat-packets-rx">0</span></div>
+                        <div class="stat-box"><span class="stat-label">Packets FWD</span><span class="stat-value" id="stat-packets-fwd">0</span></div>
+                        <div class="stat-box"><span class="stat-label">PIDs (V/A)</span><span class="stat-value" id="stat-pids">—</span></div>
+                    </div>
+                    <!-- VU Meter -->
+                    <div class="vu-meter-container">
+                        <div class="vu-label">Audio</div>
+                        <div class="vu-bars">
+                            <div class="vu-bar-wrap"><div class="vu-bar" id="vu-left"></div><span class="vu-ch">L</span></div>
+                            <div class="vu-bar-wrap"><div class="vu-bar" id="vu-right"></div><span class="vu-ch">R</span></div>
+                        </div>
+                        <div class="vu-db" id="vu-db-value">-∞ dB</div>
+                    </div>
+                    <!-- Bitrate Chart -->
+                    <div class="chart-container" style="position:relative;">
+                        <div style="position:absolute; top:5px; left:50%; transform:translateX(-50%); z-index:10;">
+                            <select id="chart-window" class="select-sm" style="background:rgba(0,0,0,0.6); font-size:14px; padding:6px 12px; border-radius:6px; color:#fff; cursor:pointer;">
+                                <option value="1m">1 Min</option>
+                                <option value="5m" selected>5 Min</option>
+                                <option value="30m">30 Min</option>
+                                <option value="1h">1 Hora</option>
+                                <option value="5h">5 Horas</option>
+                                <option value="10h">10 Horas</option>
+                            </select>
+                        </div>
+                        <div id="bitrate-chart" style="width: 100%; height: 135px; border-radius: var(--radius-sm); background: var(--bg-input); border: 1px solid var(--border-color); overflow: hidden; padding-top: 10px;"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Belabox Receiver -->
+            <section class="bbox-section">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>📡 Belabox Receiver (Docker)</h2>
+                        <div class="status-badge" id="bbox-status-badge" data-state="unknown">UNKNOWN</div>
+                    </div>
+                    <div class="card-body">
+                        <div class="bbox-controls">
+                            <button class="btn btn-sm btn-primary" id="btn-bbox-start">▶ Start</button>
+                            <button class="btn btn-sm btn-danger" id="btn-bbox-stop">⏹ Stop</button>
+                            <button class="btn btn-sm btn-secondary" id="btn-bbox-restart">🔄 Restart</button>
+                            <button class="btn btn-sm btn-secondary" id="btn-bbox-logs">📋 Logs</button>
+                            <button class="btn btn-sm btn-secondary" id="btn-bbox-edit-config">✏️ Edit Config</button>
+                            <button class="btn btn-sm btn-secondary" id="btn-bbox-edit-compose">✏️ Edit Compose</button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Config (Collapsible) -->
+            <section class="config-section">
+                <div class="card">
+                    <div class="card-header collapsible" id="config-toggle">
+                        <h2>⚙️ Configuration</h2>
+                        <span class="collapse-icon">▼</span>
+                    </div>
+                    <div class="card-body collapsed" id="config-body">
+                        <div class="config-grid">
+                            <div class="form-group"><label for="cfg-srt-addr">SRT Address</label><input type="text" id="cfg-srt-addr"></div>
+                            <div class="form-group"><label for="cfg-srt-mode">SRT Mode</label><select id="cfg-srt-mode"><option value="caller">Caller</option><option value="listener">Listener</option></select></div>
+                            <div class="form-group"><label for="cfg-srt-timeout">Timeout (ms)</label><input type="number" id="cfg-srt-timeout" min="500" max="10000"></div>
+                            <div class="form-group"><label for="cfg-min-bitrate">Min Bitrate (kbps)</label><input type="number" id="cfg-min-bitrate" min="0"></div>
+                            <div class="form-group"><label for="cfg-hysteresis">Hysteresis (s)</label><input type="number" id="cfg-hysteresis" min="1" max="60"></div>
+                            <div class="form-group"><label for="cfg-stats-url">Stats URL</label><input type="text" id="cfg-stats-url"></div>
+                        </div>
+                        <div class="form-group" style="margin-top:0.5rem;">
+                            <label for="cfg-fallback-path">Fallback Path</label>
+                            <input type="text" id="cfg-fallback-path" placeholder="/opt/oracle-stream-studio/scripts/queda.jpeg">
+                        </div>
+                        <button class="btn btn-primary" id="btn-save-config" style="margin-top:1rem;">Save Configuration</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Quick Actions -->
+            <section class="actions-bar">
+                <button class="btn btn-action" id="act-restart-srt">🔄 SRT</button>
+                <button class="btn btn-action" id="act-restart-fallback">🔄 Fallback</button>
+                <button class="btn btn-action" id="act-restart-outputs">🔄 Outputs</button>
+                <button class="btn btn-action btn-danger-subtle" id="act-restart-all">⚡ Restart All</button>
+            </section>
+
+            <!-- Switch History -->
+            <section class="history-section">
+                <div class="card">
+                    <div class="card-header collapsible" id="history-toggle">
+                        <h2>📋 Switch History</h2>
+                        <span class="collapse-icon">▼</span>
+                    </div>
+                    <div class="card-body collapsed" id="history-body">
+                        <div class="history-list" id="history-list">
+                            <p class="text-muted">No events yet.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="footer">
+            <span>Switches: <strong id="stat-switch-count">0</strong></span>
+            <span>Last: <strong id="stat-last-switch">—</strong></span>
+        </footer>
+    </div>
+
+    <!-- Output Card Template -->
+    <template id="output-card-template">
+        <div class="card output-card" data-id="">
+            <div class="output-header">
+                <h3 class="output-name">Output</h3>
+                <div class="output-actions">
+                    <button class="btn-icon btn-logs" title="Logs">📋</button>
+                    <button class="btn-icon btn-unlock" title="Unlock Controls" style="opacity: 0.7;">🔒</button>
+                    <div class="locked-controls" style="display:none; align-items:center; gap:0.2rem; background:rgba(0,0,0,0.3); padding:2px; border-radius:4px; margin-left:4px;">
+                        <button class="btn-icon btn-edit" title="Edit">✏</button>
+                        <button class="btn-icon btn-toggle" title="Start">▶</button>
+                        <button class="btn-icon btn-delete" title="Delete">🗑</button>
+                    </div>
+                </div>
+            </div>
+            <div class="output-details">
+                <div class="detail"><span class="detail-label">Status</span><span class="detail-value output-status">Stopped</span></div>
+                <div class="detail"><span class="detail-label">Codec</span><span class="detail-value output-codec">—</span></div>
+                <div class="detail"><span class="detail-label">Bitrate</span><span class="detail-value output-bitrate">—</span></div>
+                <div class="detail"><span class="detail-label">Uptime</span><span class="detail-value output-uptime">—</span></div>
+            </div>
+            <div class="output-error" style="display:none;"></div>
+        </div>
+    </template>
+
+    <!-- Add/Edit Output Modal -->
+    <div class="modal-backdrop" id="add-modal">
+        <div class="modal">
+            <div class="modal-header"><h3>Add Output</h3><button class="btn-icon btn-close-modal">&times;</button></div>
+            <form id="form-add-output">
+                <div class="modal-body">
+                    <div class="form-group"><label for="out-name">Name</label><input type="text" id="out-name" required></div>
+                    <div class="form-group"><label for="out-url">RTMP URL</label><input type="text" id="out-url" required></div>
+                    <div class="form-group"><label for="out-key">Stream Key</label><input type="password" id="out-key"></div>
+                    <div class="form-group"><label for="out-codec">Codec</label><select id="out-codec"><option value="h265">H.265 Passthrough</option><option value="h264">H.264 Transcode</option></select></div>
+                    <div id="h264-options" style="display:none;">
+                        <div class="form-group"><label for="out-bitrate">Bitrate (kbps)</label><input type="number" id="out-bitrate" value="6000"></div>
+                        <div class="form-group"><label for="out-preset">Preset</label><select id="out-preset"><option>ultrafast</option><option>superfast</option><option>veryfast</option><option>faster</option><option>fast</option></select></div>
+                        <div class="form-group checkbox-group"><input type="checkbox" id="out-overlay"><label for="out-overlay">Enable Overlay</label></div>
+                    </div>
+                </div>
+                <div class="modal-actions"><button type="button" class="btn btn-secondary btn-cancel-modal">Cancel</button><button type="submit" class="btn btn-primary">Save</button></div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Logs Modal -->
+    <div class="modal-backdrop" id="logs-modal">
+        <div class="modal modal-wide">
+            <div class="modal-header"><h3>Logs: <span id="logs-output-name"></span></h3><button class="btn-icon btn-close-modal">&times;</button></div>
+            <div class="modal-body"><div class="terminal-body"><pre id="logs-content">Loading...</pre></div></div>
+            <div class="modal-actions"><button class="btn btn-secondary" id="btn-refresh-logs">Refresh</button><button class="btn btn-secondary btn-close-modal">Close</button></div>
+        </div>
+    </div>
+
+    <!-- Assets Modal (Stage 4) -->
+    <div class="modal-backdrop" id="assets-modal">
+        <div class="modal modal-wide">
+            <div class="modal-header"><h3>🎬 Fallback Scenes & Watermarks</h3><button class="btn-icon btn-close-modal">&times;</button></div>
+            <div class="modal-body" style="max-height: 70vh; overflow-y: auto;">
+                <!-- Watermark Section -->
+                <div class="upload-section" style="margin-bottom: 1.5rem; padding-bottom: 1.5rem; border-bottom: 1px solid var(--border-color);">
+                    <h4 style="font-size: 0.95rem; font-weight: 600; margin-bottom: 0.3rem;">Watermark (.png)</h4>
+                    <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem; align-items: center;">
+                        <input type="file" id="file-watermark" accept=".png" style="flex: 1;">
+                        <button class="btn btn-secondary btn-sm" id="btn-upload-watermark">Upload Watermark</button>
+                    </div>
+                </div>
+
+                <!-- Scene Manager Section -->
+                <div class="scenes-manager-section">
+                    <h4 style="font-size: 0.95rem; font-weight: 600; margin-bottom: 0.3rem;">Fallback Scenes Management</h4>
+                    
+                    <!-- Scenes List -->
+                    <div id="scenes-list" style="margin: 1rem 0; display: flex; flex-direction: column; gap: 0.6rem;">
+                        <p class="text-muted">Loading scenes...</p>
+                    </div>
+
+                    <!-- Add Scene Form -->
+                    <div class="add-scene-form" style="margin-top: 1.5rem; padding: 1.2rem; background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: var(--radius-sm);">
+                        <h5 style="font-size: 0.85rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 0.8rem; letter-spacing: 0.05em;">Add New Fallback Scene</h5>
+                        <div class="form-group" style="margin-bottom: 0.8rem;">
+                            <label for="new-scene-name">Scene Name</label>
+                            <input type="text" id="new-scene-name" placeholder="e.g., BRB Screen / Technical Difficulties">
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0.8rem;">
+                            <label for="new-scene-file">Media File (Image or Video)</label>
+                            <input type="file" id="new-scene-file" accept=".jpg,.jpeg,.png,.mp4,.ts">
+                        </div>
+                        <button class="btn btn-primary btn-sm" id="btn-add-scene" style="margin-top: 0.3rem; min-height: 38px;">➕ Add Scene</button>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-actions"><button class="btn btn-secondary btn-close-modal">Done</button></div>
+        </div>
+    </div>
+
+    <!-- Recordings Modal -->
+    <div class="modal-backdrop" id="recordings-modal">
+        <div class="modal modal-wide">
+            <div class="modal-header"><h3>🎥 Recordings</h3><button class="btn-icon btn-close-modal">&times;</button></div>
+            <div class="modal-body"><div id="recordings-list"><p class="text-muted">Loading...</p></div></div>
+            <div class="modal-actions"><button class="btn btn-secondary" id="btn-refresh-recs">Refresh</button><button class="btn btn-secondary btn-close-modal">Close</button></div>
+        </div>
+    </div>
+
+    <!-- Bbox Config Editor Modal -->
+    <div class="modal-backdrop" id="bbox-editor-modal">
+        <div class="modal modal-wide">
+            <div class="modal-header"><h3 id="bbox-editor-title">Edit File</h3><button class="btn-icon btn-close-modal">&times;</button></div>
+            <div class="modal-body">
+                <textarea id="bbox-editor-textarea" style="width: 100%; height: 300px; font-family: monospace; background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-color); padding: 0.5rem; resize: vertical;"></textarea>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-secondary btn-close-modal">Cancel</button>
+                <button class="btn btn-primary" id="btn-bbox-save-editor">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bbox Logs Modal -->
+    <div class="modal-backdrop" id="bbox-logs-modal">
+        <div class="modal modal-wide">
+            <div class="modal-header"><h3>📡 Bbox Logs</h3><button class="btn-icon btn-close-modal">&times;</button></div>
+            <div class="modal-body"><div class="terminal-body"><pre id="bbox-logs-content">Loading...</pre></div></div>
+            <div class="modal-actions"><button class="btn btn-secondary" id="btn-refresh-bbox-logs">Refresh</button><button class="btn btn-secondary btn-close-modal">Close</button></div>
+        </div>
+    </div>
+
+    <div id="toast-container"></div>
+    <script src="app.js?v=3.1"></script>
+</body>
+</html>

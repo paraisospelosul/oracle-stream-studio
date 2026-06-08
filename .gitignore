@@ -1,0 +1,19 @@
+# Binários
+oracle-stream-studio
+oracle_stream_studio_final
+*.exe
+
+# Dados sensíveis
+.env
+install_personal.sh
+
+# Mídia local
+fallback.*
+watermark.png
+queda.jpeg
+data/scenes/
+
+# Sistema
+.DS_Store
+*.swp
+*~

@@ -1,0 +1,9 @@
+{
+  "srt_addr": "localhost:8282?streamid=play/stream/belabox?srtauth=belabox",
+  "srt_mode": "caller",
+  "srt_timeout": 300,
+  "stats_url": "http://localhost:8181/stats?publisher=live/stream/belabox?srtauth=belabox",
+  "fallback_path": "/opt/oracle-stream-studio/scripts/queda.jpeg",
+  "min_bitrate_kbps": 300,
+  "bitrate_hysteresis_seconds": 5
+}
