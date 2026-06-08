@@ -396,6 +396,7 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.switcher.UpdateConfig(cfg)
+		log.Printf("[AUDIT] Switcher Config updated by client %s", r.RemoteAddr)
 		json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -429,6 +430,7 @@ func (s *APIServer) handleOutputs(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
+		log.Printf("[AUDIT] Output added: id=%s name=%s by client %s", config.ID, config.Name, r.RemoteAddr)
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(config)
 	default:
@@ -455,6 +457,7 @@ func (s *APIServer) handleOutputAction(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
+		log.Printf("[AUDIT] Output started: id=%s by client %s", id, r.RemoteAddr)
 		json.NewEncoder(w).Encode(map[string]string{"status": "started"})
 	case action == "stop" && r.Method == http.MethodPost:
 		if err := s.outputManager.StopOutput(id); err != nil {
@@ -462,6 +465,7 @@ func (s *APIServer) handleOutputAction(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
+		log.Printf("[AUDIT] Output stopped: id=%s by client %s", id, r.RemoteAddr)
 		json.NewEncoder(w).Encode(map[string]string{"status": "stopped"})
 	case action == "logs" && r.Method == http.MethodGet:
 		logs, err := s.outputManager.GetLogs(id)
@@ -482,6 +486,7 @@ func (s *APIServer) handleOutputAction(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
+		log.Printf("[AUDIT] Output config updated: id=%s by client %s", id, r.RemoteAddr)
 		json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
 	case action == "" && r.Method == http.MethodDelete:
 		if err := s.outputManager.RemoveOutput(id); err != nil {
@@ -489,6 +494,7 @@ func (s *APIServer) handleOutputAction(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
+		log.Printf("[AUDIT] Output removed: id=%s by client %s", id, r.RemoteAddr)
 		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -507,17 +513,21 @@ func (s *APIServer) handleQuickAction(w http.ResponseWriter, r *http.Request) {
 	switch action {
 	case "restart-srt":
 		s.switcher.RestartSRT()
+		log.Printf("[AUDIT] Quick action executed: restart-srt by client %s", r.RemoteAddr)
 		json.NewEncoder(w).Encode(map[string]string{"status": "SRT restart requested"})
 	case "restart-fallback":
 		s.switcher.RestartFallback()
+		log.Printf("[AUDIT] Quick action executed: restart-fallback by client %s", r.RemoteAddr)
 		json.NewEncoder(w).Encode(map[string]string{"status": "Fallback restart requested"})
 	case "restart-outputs":
 		s.outputManager.RestartAll()
+		log.Printf("[AUDIT] Quick action executed: restart-outputs by client %s", r.RemoteAddr)
 		json.NewEncoder(w).Encode(map[string]string{"status": "All outputs restarted"})
 	case "restart-all":
 		s.switcher.RestartSRT()
 		s.switcher.RestartFallback()
 		s.outputManager.RestartAll()
+		log.Printf("[AUDIT] Quick action executed: restart-all by client %s", r.RemoteAddr)
 		json.NewEncoder(w).Encode(map[string]string{"status": "Full restart requested"})
 	default:
 		w.WriteHeader(http.StatusNotFound)
@@ -548,6 +558,7 @@ func (s *APIServer) handleRecording(w http.ResponseWriter, r *http.Request) {
 				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 				return
 			}
+			log.Printf("[AUDIT] Recording started by client %s", r.RemoteAddr)
 			json.NewEncoder(w).Encode(map[string]string{"status": "recording started"})
 		case "stop":
 			if err := s.recorder.Stop(); err != nil {
@@ -555,6 +566,7 @@ func (s *APIServer) handleRecording(w http.ResponseWriter, r *http.Request) {
 				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 				return
 			}
+			log.Printf("[AUDIT] Recording stopped by client %s", r.RemoteAddr)
 			json.NewEncoder(w).Encode(map[string]string{"status": "recording stopped"})
 		default:
 			http.Error(w, "use ?action=start or ?action=stop", http.StatusBadRequest)
@@ -598,6 +610,7 @@ func (s *APIServer) handleRecordingAction(w http.ResponseWriter, r *http.Request
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
+		log.Printf("[AUDIT] Recording file deleted: name=%s by client %s", name, r.RemoteAddr)
 		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
 
 	case http.MethodPut:
@@ -616,6 +629,7 @@ func (s *APIServer) handleRecordingAction(w http.ResponseWriter, r *http.Request
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
+		log.Printf("[AUDIT] Recording file renamed: old=%s new=%s by client %s", name, body.NewName, r.RemoteAddr)
 		json.NewEncoder(w).Encode(map[string]string{"status": "renamed"})
 
 	default:
@@ -915,6 +929,7 @@ func (s *APIServer) handleBboxAction(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	log.Printf("[AUDIT] Bbox Docker Action executed: action=%s by client %s", action, r.RemoteAddr)
 	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 }
 
@@ -1030,6 +1045,7 @@ func (s *APIServer) handleActivateScene(w http.ResponseWriter, r *http.Request) 
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	log.Printf("[AUDIT] Scene activated: id=%s by client %s", req.ID, r.RemoteAddr)
 	json.NewEncoder(w).Encode(map[string]string{"status": "success", "active_id": req.ID})
 }
 
@@ -1074,6 +1090,7 @@ func (s *APIServer) handleDeleteScene(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	log.Printf("[AUDIT] Scene deleted: id=%s by client %s", req.ID, r.RemoteAddr)
 	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 }
 
