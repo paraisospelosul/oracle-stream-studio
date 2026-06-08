@@ -68,7 +68,19 @@ func NewAPIServer(switcher *Switcher, outputManager *OutputManager, sysStats *Sy
 		webPass:       webPass,
 		tlsCert:       tlsCert,
 		tlsKey:        tlsKey,
-		upgrader:      websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool {
+				origin := r.Header.Get("Origin")
+				if origin == "" {
+					return true
+				}
+				host := r.Host
+				if strings.Contains(origin, host) || strings.Contains(origin, "localhost") || strings.Contains(origin, "127.0.0.1") {
+					return true
+				}
+				return false
+			},
+		},
 		clients:       make(map[*websocket.Conn]bool),
 	}
 }
@@ -95,11 +107,15 @@ func (s *APIServer) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin != "" {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
-			w.Header().Set("Access-Control-Max-Age", "3600")
+			// Validate Origin (Allow same-host or localhost for dev)
+			host := r.Host
+			if strings.Contains(origin, host) || strings.Contains(origin, "localhost") || strings.Contains(origin, "127.0.0.1") {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+				w.Header().Set("Access-Control-Max-Age", "3600")
+			}
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -190,17 +206,21 @@ func (s *APIServer) rateLimitMiddleware(rl *rateLimiter, next http.Handler) http
 
 // ─── Body Size Limit Middleware ───
 
-const maxBodySize = 10 << 20 // 10 MB
+const maxBodySize = 10 << 20 // 10 MB default
 
 func bodySizeLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Body != nil && r.ContentLength > maxBodySize {
+		limit := int64(maxBodySize)
+		if strings.HasPrefix(r.URL.Path, "/api/upload/") {
+			limit = 100 << 20 // 100 MB for file uploads
+		}
+		if r.Body != nil && r.ContentLength > limit {
 			http.Error(w, `{"error":"request body too large"}`, http.StatusRequestEntityTooLarge)
 			return
 		}
 		// Also wrap the body reader to enforce the limit even if Content-Length is missing/lying
 		if r.Body != nil {
-			r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -593,6 +613,9 @@ func (s *APIServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.clientsMu.Lock()
 	s.clients[conn] = true
 	s.clientsMu.Unlock()
+	
+	conn.SetReadLimit(4096) // Limit WebSocket message size to 4KB to prevent DoS memory exhaustion
+
 	go func() {
 		defer func() {
 			s.clientsMu.Lock()
@@ -600,11 +623,27 @@ func (s *APIServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			s.clientsMu.Unlock()
 			conn.Close()
 		}()
+		
+		msgCount := 0
+		lastCheck := time.Now()
+		
 		for {
 			_, msgBytes, err := conn.ReadMessage()
 			if err != nil {
 				return
 			}
+			
+			// Rate limit incoming messages (max 30 messages/sec) to prevent overlay drag spam DoS
+			now := time.Now()
+			if now.Sub(lastCheck) >= 1*time.Second {
+				msgCount = 0
+				lastCheck = now
+			}
+			msgCount++
+			if msgCount > 30 {
+				time.Sleep(50 * time.Millisecond) // Throttle the connection
+			}
+			
 			var msg WSMessage
 			if err := json.Unmarshal(msgBytes, &msg); err != nil {
 				continue
