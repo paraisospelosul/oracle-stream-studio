@@ -226,6 +226,17 @@ func bodySizeLimitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// ─── Security Headers Middleware ───
+
+func securityHeadersMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Security-Policy", "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com https://cdn.jsdelivr.net; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;")
+		next.ServeHTTP(w, r)
+	})
+}
+
 type StatusResponse struct {
 	System    SystemStats     `json:"system"`
 	Switcher  SwitcherStats   `json:"switcher"`
@@ -301,6 +312,7 @@ func (s *APIServer) Run(ctx context.Context) error {
 	handler = s.corsMiddleware(handler)
 	handler = s.rateLimitMiddleware(rl, handler)
 	handler = bodySizeLimitMiddleware(handler)
+	handler = securityHeadersMiddleware(handler)
 	handler = loggingMiddleware(handler)
 
 	srv := &http.Server{

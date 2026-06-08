@@ -166,6 +166,16 @@ As entradas padrão do Bbox seguem os seguintes formatos de StreamID para autent
 | **Entrada (Mochila)** | SRTLA | `5000` | `live/stream/nomedostream?srtauth=suachave` | `srtla://ip:5000?streamid=live/stream/belabox?srtauth=belabox` |
 | **Saída (Local)** | SRT | `8282` | `play/stream/nomedostream?srtauth=suachave` | `srt://localhost:8282?streamid=play/stream/belabox?srtauth=belabox` |
 
+## Segurança Auditada 🛡️
+
+O Oracle Stream Studio passou por auditoria de segurança e foi otimizado para produção com as seguintes proteções:
+- **Autenticação**: Suporte nativo a HTTP Basic Auth para proteger a Web UI.
+- **CORS & WebSocket Origin Checks**: Restrição estrita de origens apenas para o mesmo Host de execução e desenvolvimento local (`localhost` / `127.0.0.1`).
+- **Proteção contra DoS no WebSocket**: Limitação do tamanho de mensagens para 4KB e limitação de taxa (máximo de 30 msgs/s por conexão com auto-throttling) para mitigar floods.
+- **Limites de Upload Inteligentes**: Limite de 10MB para requisições da API REST e limite estrito de 100MB para uploads de arquivos de fallback usando `MaxBytesReader`.
+- **Cabeçalhos de Segurança**: Envio automático de cabeçalhos de proteção moderna, incluindo `Content-Security-Policy` (CSP restritivo), `X-Frame-Options: SAMEORIGIN` (anti-clickjacking) e `X-Content-Type-Options: nosniff`.
+- **Sanitização de Caminhos**: Proteção ativa contra Path Traversal no gerenciamento e download de gravações locais.
+
 ## Licença
 
 MIT
