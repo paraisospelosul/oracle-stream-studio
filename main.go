@@ -33,7 +33,7 @@ func main() {
 	tlsKey := flag.String("tls-key", "", "Path to TLS private key file")
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Oracle Stream Studio v1.9 — H.265 Failover Relay + Multi-Output RTMP\n\n")
+		fmt.Fprintf(os.Stderr, "Oracle Stream Studio v1.8.1 — H.265 Failover Relay + Multi-Output RTMP\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: oracle-stream-studio [flags]\n\nFlags:\n")
 		flag.PrintDefaults()
 	}
@@ -107,7 +107,7 @@ func main() {
 	os.MkdirAll(*dataDir, 0755)
 
 	fmt.Println("╔═══════════════════════════════════════════════╗")
-	fmt.Println("║         Oracle Stream Studio v1.9             ║")
+	fmt.Println("║        Oracle Stream Studio v1.8.1            ║")
 	fmt.Println("║   H.265 Failover Relay + Multi-Output RTMP    ║")
 	fmt.Println("╚═══════════════════════════════════════════════╝")
 	fmt.Println()
