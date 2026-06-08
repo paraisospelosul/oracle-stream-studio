@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.2] - 2026-06-08
+
+### Added
+- Created `scripts/create_fallback.sh` helper script to generate standard H.265 MPEG-TS fallback files with 2-second GOP interval and stereo AAC audio.
+
+### Changed
+- Reorganized installers: moved `install.sh` and `install_personal.sh` to `scripts/` folder.
+- Enhanced `install.sh` to automatically copy repository source code to `/opt/oracle-stream-studio` if executed from a different directory (e.g. from the home directory).
+- Configured `install.sh` to automatically generate a default 60-second black screen fallback video with silent audio in H.265, preventing crash loops on first boot, and added a warning regarding processing time.
+- Configured `install.sh` to automatically start the `oracle-stream-studio` systemd service upon successful build.
+- Configured the systemd service to start Oracle Stream Studio on port 80 by default.
+
 ## [1.8.1] - 2026-06-08
 
 ### Changed
