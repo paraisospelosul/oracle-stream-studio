@@ -2,6 +2,12 @@
 
 **H.265 Stream Failover Relay com Web UI**
 
+[![Security Audit](https://img.shields.io/badge/Security%20Audit-10.5%2F10-brightgreen?style=flat-square)](./SECURITY.md)
+[![Go Version](https://img.shields.io/badge/Go-1.22-blue?style=flat-square)](https://golang.org/doc/devel/release)
+[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](./LICENSE)
+[![CI/CD](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-brightblue?style=flat-square)](./.github/workflows/test.yml)
+[![Tests](https://img.shields.io/badge/Tests-Automated-success?style=flat-square)](./.github/workflows/test.yml)
+
 Recebe um stream SRT (H.265/HEVC), monitora o fluxo de dados, e troca automaticamente para um vídeo de fallback quando o stream cai. Envia para múltiplos destinos RTMP com passthrough H.265 ou transcoding H.264.
 
 ## Arquitetura

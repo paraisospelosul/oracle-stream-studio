@@ -21,11 +21,30 @@ jobs:
       run: |
         go mod download
 
+    - name: Verify Go format (fmt)
+      run: |
+        if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+          echo "Files need formatting:"
+          gofmt -s -l .
+          exit 1
+        fi
+
+    - name: Verify go mod tidy
+      run: |
+        go mod tidy
+        git diff --exit-code go.mod go.sum || (echo "go.mod/go.sum not tidy" && exit 1)
+
     - name: Run vet
       run: go vet ./...
 
-    - name: Run tests
-      run: go test -v ./...
+    - name: Run tests with coverage
+      run: go test -v -coverprofile=coverage.out -covermode=atomic ./...
+
+    - name: Upload coverage
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: coverage.out
 
     - name: Build binary
       run: go build -v -o oracle-stream-studio .

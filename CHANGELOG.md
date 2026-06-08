@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.0] - 2026-06-08
+
+### Added
+- Created comprehensive unit tests for `output.go`, `switcher.go`, and `recorder.go` boosting overall test coverage above 60%.
+- Added visual shields/badges to the `README.md` showing security status, Go version, license, and CI build results.
+- Added project guidelines: `CONTRIBUTING.md` and `ROADMAP.md`.
+- Configured automated test coverage profiling and fmt checks in GitHub Actions CI workflow.
+- Excluded log files, editor settings, and coverage outputs in `.gitignore`.
+
 ## [1.5.0] - 2026-06-08
 
 ### Added

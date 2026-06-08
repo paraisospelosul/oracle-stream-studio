@@ -5,6 +5,7 @@ oracle_stream_studio_final
 
 # Dados sensíveis
 .env
+.env.local
 install_personal.sh
 
 # Mídia local
@@ -13,7 +14,16 @@ watermark.png
 queda.jpeg
 data/scenes/
 
-# Sistema
+# Logs e Cobertura
+*.log
+coverage.out
+*.prof
+/vendor/
+
+# Sistema e IDEs
 .DS_Store
 *.swp
+*.swo
 *~
+.vscode/
+.idea/
