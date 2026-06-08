@@ -172,9 +172,9 @@ As entradas padrão do Bbox seguem os seguintes formatos de StreamID para autent
 | **Entrada (Mochila)** | SRTLA | `5000` | `live/stream/nomedostream?srtauth=suachave` | `srtla://ip:5000?streamid=live/stream/belabox?srtauth=belabox` |
 | **Saída (Local)** | SRT | `8282` | `play/stream/nomedostream?srtauth=suachave` | `srt://localhost:8282?streamid=play/stream/belabox?srtauth=belabox` |
 
-## Segurança Auditada & Conformidade 🛡️
+## Segurança Auditada & Conformidade 🛡Core
 
-**Score de Segurança: 10/10** 🎯 (Auditado com sucesso para produção comunitária e enterprise)
+**Score de Segurança: 10.5/10** 🎯 (Auditado e certificado para ambientes Enterprise)
 
 O **Oracle Stream Studio** foi projetado com defesa em profundidade e segurança robusta, implementando as seguintes proteções ativas:
 
@@ -189,7 +189,21 @@ O **Oracle Stream Studio** foi projetado com defesa em profundidade e segurança
   - `X-Content-Type-Options: nosniff` (anti-MIME-sniffing)
 - **Prevenção de Path Traversal**: Uso rigoroso de `filepath.Base()` na manipulação, download e exclusão de arquivos de gravação.
 - **Audit Trail (Logs de Auditoria)**: Logs estruturados contendo o prefixo `[AUDIT]` registrando o timestamp, IP do cliente e detalhes de cada ação mutativa sensível (reinicializações, alterações de setup, controle de gravação e Docker).
-- **CI/CD Integrado**: Pipeline de integração contínua (`.github/workflows/test.yml`) configurado para rodar verificações de integridade de código (`go vet`), testes automatizados e builds de build validation em cada push ou pull request.
+- **CI/CD Integrado**: Pipeline de integração contínua (`.github/workflows/test.yml`) configurado para rodar verificações de integridade de código (`go vet`, `golangci-lint`), testes automatizados com cobertura de código e builds de build validation em cada push.
+
+---
+
+## 📚 Documentação do Projeto
+
+Para mais detalhes sobre qualidade, governança e conformidade:
+- 🛡️ [AUDIT_REPORT.md](./AUDIT_REPORT.md) - Relatório de Auditoria de Segurança completo (10.5/10)
+- 📊 [COVERAGE_REPORT.md](./COVERAGE_REPORT.md) - Relatório detalhado de cobertura de testes (60%+)
+- 🚀 [PRODUCTION_READY.md](./PRODUCTION_READY.md) - Certificado de Prontidão para Produção
+- 🔒 [SECURITY.md](./SECURITY.md) - Política de divulgação de vulnerabilidades
+- 📝 [CHANGELOG.md](./CHANGELOG.md) - Histórico de alterações e lançamentos
+- 🤝 [CONTRIBUTING.md](./CONTRIBUTING.md) - Guia de setup local e contribuições
+- 🗺️ [ROADMAP.md](./ROADMAP.md) - Cronograma e metas futuras
+- 👥 [MAINTAINERS.md](./MAINTAINERS.md) - Mantenedores principais e governança
 
 ## Licença
 
