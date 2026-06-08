@@ -173,6 +173,7 @@ O Oracle Stream Studio passou por auditoria de segurança e foi otimizado para p
 - **CORS & WebSocket Origin Checks**: Restrição estrita de origens apenas para o mesmo Host de execução e desenvolvimento local (`localhost` / `127.0.0.1`).
 - **Proteção contra DoS no WebSocket**: Limitação do tamanho de mensagens para 4KB e limitação de taxa (máximo de 30 msgs/s por conexão com auto-throttling) para mitigar floods.
 - **Limites de Upload Inteligentes**: Limite de 10MB para requisições da API REST e limite estrito de 100MB para uploads de arquivos de fallback usando `MaxBytesReader`.
+- **Validação de Espaço em Disco**: Bloqueio de novos uploads caso a VPS tenha menos de 500MB de espaço livre em disco, evitando travamentos do sistema operacional.
 - **Cabeçalhos de Segurança**: Envio automático de cabeçalhos de proteção moderna, incluindo `Content-Security-Policy` (CSP restritivo), `X-Frame-Options: SAMEORIGIN` (anti-clickjacking) e `X-Content-Type-Options: nosniff`.
 - **Sanitização de Caminhos**: Proteção ativa contra Path Traversal no gerenciamento e download de gravações locais.
 

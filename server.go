@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -235,6 +236,20 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Content-Security-Policy", "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com https://cdn.jsdelivr.net; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// checkDiskSpace verifies if the volume containing path has at least minFreeBytes available space
+func checkDiskSpace(path string, minFreeBytes uint64) error {
+	var stat syscall.Statfs_t
+	err := syscall.Statfs(path, &stat)
+	if err != nil {
+		return err
+	}
+	freeBytes := uint64(stat.Bavail) * uint64(stat.Bsize)
+	if freeBytes < minFreeBytes {
+		return fmt.Errorf("insufficient disk space: only %d MB available, need at least %d MB", freeBytes/(1024*1024), minFreeBytes/(1024*1024))
+	}
+	return nil
 }
 
 type StatusResponse struct {
@@ -726,6 +741,12 @@ func (s *APIServer) handleUploadFallback(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if err := checkDiskSpace(s.dataDir, 500*1024*1024); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInsufficientStorage)
+		w.Write([]byte(fmt.Sprintf(`{"error":"%v"}`, err)))
+		return
+	}
 	r.ParseMultipartForm(50 << 20)
 	file, handler, err := r.FormFile("file")
 	if err != nil {
@@ -785,6 +806,12 @@ func (s *APIServer) handleUploadFallback(w http.ResponseWriter, r *http.Request)
 func (s *APIServer) handleUploadWatermark(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := checkDiskSpace(s.dataDir, 500*1024*1024); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInsufficientStorage)
+		w.Write([]byte(fmt.Sprintf(`{"error":"%v"}`, err)))
 		return
 	}
 	r.ParseMultipartForm(10 << 20)
@@ -1052,6 +1079,12 @@ func (s *APIServer) handleDeleteScene(w http.ResponseWriter, r *http.Request) {
 
 func (s *APIServer) handleUploadScene(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	
+	if err := checkDiskSpace(s.dataDir, 500*1024*1024); err != nil {
+		w.WriteHeader(http.StatusInsufficientStorage)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
 	
 	r.ParseMultipartForm(50 << 20) // 50MB max upload
 	file, handler, err := r.FormFile("file")
