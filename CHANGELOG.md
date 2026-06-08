@@ -2,10 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.1.0] - 2026-06-08
+## [1.5.0] - 2026-06-08
 
 ### Added
-- Rebranded project to **Oracle Stream Studio v1.1**.
+- Rebranded project to **Oracle Stream Studio v1.5**.
 - Added standard `LICENSE` file (MIT License).
 - Added GitHub Actions CI pipeline (`.github/workflows/test.yml`) for automated testing and builds.
 - Added a security policy documentation (`SECURITY.md`).
