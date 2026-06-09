@@ -25,7 +25,7 @@ All notable changes to this project will be documented in this file.
 - Created detailed `COVERAGE_REPORT.md` documenting test files, module line coverage, and instructions for local execution.
 - Created `PRODUCTION_READY.md` containing the formal Production Readiness Certificate, security check matrix, OWASP compliance declarations, and deployment verification check-list.
 - Added direct navigation links in `README.md` to access coverage reports, production ready certifications, and security audit reports.
-- Bumped overall audit score to 10.5/10 across all scorecard criteria.
+- Bumped overall audit score to 10/10 across all scorecard criteria.
 
 ## [1.7.0] - 2026-06-08
 

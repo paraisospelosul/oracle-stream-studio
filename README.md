@@ -174,7 +174,7 @@ As entradas padrão do Bbox seguem os seguintes formatos de StreamID para autent
 
 ## Segurança Auditada & Conformidade 🛡Core
 
-**Score de Segurança: 10.5/10** 🎯 (Auditado e certificado para ambientes Enterprise)
+**Score de Segurança: 10/10** 🎯 (Auditado e certificado para ambientes Enterprise)
 
 O **Oracle Stream Studio** foi projetado com defesa em profundidade e segurança robusta, implementando as seguintes proteções ativas:
 
@@ -196,7 +196,7 @@ O **Oracle Stream Studio** foi projetado com defesa em profundidade e segurança
 ## 📚 Documentação do Projeto
 
 Para mais detalhes sobre qualidade, governança e conformidade:
-- 🛡️ [AUDIT_REPORT.md](./AUDIT_REPORT.md) - Relatório de Auditoria de Segurança completo (10.5/10)
+- 🛡️ [AUDIT_REPORT.md](./AUDIT_REPORT.md) - Relatório de Auditoria de Segurança completo (10/10)
 - 📊 [COVERAGE_REPORT.md](./COVERAGE_REPORT.md) - Relatório detalhado de cobertura de testes (60%+)
 - 🚀 [PRODUCTION_READY.md](./PRODUCTION_READY.md) - Certificado de Prontidão para Produção
 - 🔒 [SECURITY.md](./SECURITY.md) - Política de divulgação de vulnerabilidades
