@@ -157,11 +157,11 @@ Use o script `create_fallback.sh` para garantir compatibilidade.
 
 ## Integração Belabox & Agradecimentos
 
-O **Oracle Stream Studio** possui integração nativa de gerenciamento (Start/Stop, Logs e Edição de Configuração) com o [Belabox Receiver](https://github.com/datagutt/belabox-receiver) criado por **Datagutt**. 
+O **Oracle Stream Studio** possui integração nativa de gerenciamento (Start/Stop, Logs e Edição de Configuração) com a suíte de recepção SRTLA.
 
 Agradecimentos especiais a:
-- **Datagutt** pela criação do [Belabox Receiver](https://github.com/datagutt/belabox-receiver), fornecendo uma base excelente e sólida de agregação SRTLA para transmissões IRL (In Real Life) estáveis, e pela colaboração amigável no aprimoramento de regras de segurança contra ataques de negação de serviço (DoS/DDoS) na stack SRTLA.
-- Ao projeto oficial de código-fonte aberto [SRTLA](https://github.com/IRLServer/srtla) no qual nossa solução se apoia para o transporte multiplexado.
+- **Rationalirl**: O criador e idealizador original do protocolo e da stack SRTLA (Belabox), que revolucionou as transmissões IRL de código aberto ao possibilitar o *bonding* robusto de conexões móveis.
+- **Datagutt**: O atual mantenedor principal e desenvolvedor líder do ecossistema SRTLA. Agradecemos imensamente a ele pela evolução contínua do [Belabox Receiver](https://github.com/datagutt/belabox-receiver) e do [SRTLA moderno](https://github.com/IRLServer/srtla) (que agora conta com telemetria avançada), fornecendo a base atualizada e robusta de agregação que a nossa comunidade utiliza ativamente na produção.
 
 ### Padrões de Entrada/Saída do Bbox
 
