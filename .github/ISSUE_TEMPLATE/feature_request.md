@@ -1,7 +1,8 @@
-name: Feature Request
-about: Suggest an idea for Oracle Stream Studio
-title: '[FEATURE] '
-labels: 'enhancement'
+---
+name: Feature request
+about: Suggest an idea for this project
+title: ''
+labels: ''
 assignees: ''
 
 ---
@@ -10,7 +11,7 @@ assignees: ''
 A clear and concise description of what the problem is. Ex. I'm always frustrated when [...]
 
 **Describe the solution you'd like**
-A clear and concise description of what you want to happen. How would this improve the stream manager?
+A clear and concise description of what you want to happen.
 
 **Describe alternatives you've considered**
 A clear and concise description of any alternative solutions or features you've considered.
