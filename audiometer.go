@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -190,12 +189,4 @@ func bytesToEstimatedDB(bytesPerSec uint64) float64 {
 	default:
 		return -6.0
 	}
-}
-
-// FormatLevel returns a human-readable level string
-func FormatLevel(db float64) string {
-	if db <= -70 {
-		return "-∞"
-	}
-	return fmt.Sprintf("%.1f dB", db)
 }
