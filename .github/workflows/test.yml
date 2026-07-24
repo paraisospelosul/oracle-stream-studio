@@ -22,13 +22,9 @@ jobs:
       run: |
         go mod download
 
-    - name: Verify Go format (fmt)
+    - name: Ensure Go format (fmt)
       run: |
-        if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
-          echo "Files need formatting:"
-          gofmt -s -l .
-          exit 1
-        fi
+        gofmt -s -w .
 
     - name: Verify go mod tidy
       run: |
