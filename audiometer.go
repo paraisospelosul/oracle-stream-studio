@@ -1,28 +1,30 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
-	"io"
 	"log"
-	"os/exec"
-	"regexp"
-	"strconv"
 	"sync"
-	"syscall"
+	"sync/atomic"
 	"time"
 )
 
-// AudioMeter monitors audio levels from the broadcaster stream using ebur128
+// AudioMeter monitors audio presence from the broadcaster stream by counting
+// audio TS packet bytes — zero FFmpeg, zero CPU decoding.
+// Replaces the old ebur128-based meter that spawned a permanent FFmpeg process.
 type AudioMeter struct {
 	broadcaster *Broadcaster
-	peakL       float64
-	peakR       float64
-	momentary   float64
-	mu          sync.RWMutex
-	cmd         *exec.Cmd
-	running     bool
-	stopCh      chan struct{}
+	switcher    *Switcher
+
+	// Estimated levels based on audio byte throughput
+	peakL     float64
+	peakR     float64
+	momentary float64
+	mu        sync.RWMutex
+
+	// Byte counting
+	audioBytes atomic.Uint64
+	running    atomic.Bool
+	stopCh     chan struct{}
 }
 
 type AudioLevels struct {
@@ -31,9 +33,10 @@ type AudioLevels struct {
 	Momentary float64 `json:"momentary_lufs"`
 }
 
-func NewAudioMeter(broadcaster *Broadcaster) *AudioMeter {
+func NewAudioMeter(broadcaster *Broadcaster, switcher *Switcher) *AudioMeter {
 	return &AudioMeter{
 		broadcaster: broadcaster,
+		switcher:    switcher,
 		peakL:       -70,
 		peakR:       -70,
 		momentary:   -70,
@@ -48,119 +51,144 @@ func (am *AudioMeter) GetLevels() AudioLevels {
 
 func (am *AudioMeter) Start() {
 	am.stopCh = make(chan struct{})
-	am.running = true
-	log.Println("[audio] Starting audio meter (ebur128)")
-	for am.running {
-		am.runMeterProcess()
-		if !am.running {
-			break
-		}
+	am.running.Store(true)
+	log.Println("[audio] Starting lightweight audio meter (TS byte counter)")
+
+	// Goroutine 1: count audio bytes from broadcaster packets
+	go am.countAudioBytes()
+
+	// Goroutine 2: estimate levels every second from byte count
+	am.estimateLoop()
+}
+
+func (am *AudioMeter) Stop() {
+	if !am.running.CompareAndSwap(true, false) {
+		return
+	}
+	select {
+	case <-am.stopCh:
+	default:
+		close(am.stopCh)
+	}
+}
+
+// countAudioBytes subscribes to the broadcaster and counts bytes belonging
+// to audio PID packets. This runs entirely in memory with zero FFmpeg.
+func (am *AudioMeter) countAudioBytes() {
+	subID := "audiometer_bytecounter"
+	dataCh := am.broadcaster.Subscribe(subID)
+	defer am.broadcaster.Unsubscribe(subID)
+
+	for {
 		select {
-		case <-time.After(3 * time.Second):
+		case data, ok := <-dataCh:
+			if !ok {
+				return
+			}
+			audioPID := am.switcher.audioPID
+			if audioPID == 0 {
+				continue
+			}
+			// Count bytes in TS packets that match the audio PID
+			audioBytes := countPIDBytes(data, audioPID)
+			if audioBytes > 0 {
+				am.audioBytes.Add(uint64(audioBytes))
+			}
 		case <-am.stopCh:
 			return
 		}
 	}
 }
 
-func (am *AudioMeter) Stop() {
-	am.running = false
-	select {
-	case <-am.stopCh:
-	default:
-		close(am.stopCh)
-	}
-	if am.cmd != nil && am.cmd.Process != nil {
-		am.cmd.Process.Kill()
-	}
-	time.Sleep(100 * time.Millisecond)
-}
-
-// ebur128 output line example:
-// [Parsed_ebur128_0 @ 0x...] t: 1.0   M: -23.0 S: -23.0   I: -70.0 ...   FTPK: -12.3 -12.3 dBFS  TPK: -12.3 -12.3 dBFS
-var ebur128Re = regexp.MustCompile(`M:\s*([-\d.]+)\s+S:.*?FTPK:\s*([-\d.]+)\s+([-\d.]+)`)
-
-func (am *AudioMeter) runMeterProcess() {
-	subID := "audiometer_internal"
-	dataCh := am.broadcaster.Subscribe(subID)
-	defer am.broadcaster.Unsubscribe(subID)
-
-	args := []string{
-		"-hide_banner",
-		"-fflags", "+genpts+discardcorrupt",
-		"-analyzeduration", "2000000",
-		"-probesize", "1000000",
-		"-f", "mpegts",
-		"-i", "pipe:0",
-		"-vn",
-		"-filter_complex", "ebur128=peak=true",
-		"-f", "null", "-",
-	}
-
-	cmd := exec.Command("ffmpeg", args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		log.Printf("[audio] stdin pipe error: %v", err)
-		return
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		log.Printf("[audio] stderr pipe error: %v", err)
-		return
-	}
-
-	if err := cmd.Start(); err != nil {
-		log.Printf("[audio] start error: %v", err)
-		return
-	}
-	am.cmd = cmd
-	log.Printf("[audio] FFmpeg ebur128 started (PID %d)", cmd.Process.Pid)
-
-	// Feed data to FFmpeg
-	go func() {
-		defer stdin.Close()
-		for {
-			select {
-			case data, ok := <-dataCh:
-				if !ok {
-					return
-				}
-				if _, err := stdin.Write(data); err != nil {
-					return
-				}
-			case <-am.stopCh:
-				return
+// countPIDBytes counts total payload bytes in TS packets matching the given PID
+func countPIDBytes(data []byte, targetPID uint16) int {
+	total := 0
+	for offset := 0; offset+tsPacketSize <= len(data); offset += tsPacketSize {
+		pkt := data[offset : offset+tsPacketSize]
+		if pkt[0] != tsSyncByte {
+			continue
+		}
+		pid := uint16(pkt[1]&0x1F)<<8 | uint16(pkt[2])
+		if pid != targetPID {
+			continue
+		}
+		// Count payload bytes (after header + adaptation field)
+		adaptationControl := (pkt[3] >> 4) & 0x03
+		hasPayload := (adaptationControl & 0x01) != 0
+		if !hasPayload {
+			continue
+		}
+		payloadOffset := 4
+		if (adaptationControl & 0x02) != 0 { // has adaptation field
+			if payloadOffset < tsPacketSize {
+				payloadOffset += 1 + int(pkt[4])
 			}
 		}
-	}()
-
-	// Parse ebur128 stderr output
-	am.parseEbur128(stderr)
-	cmd.Wait()
-	log.Println("[audio] FFmpeg ebur128 exited")
+		if payloadOffset < tsPacketSize {
+			total += tsPacketSize - payloadOffset
+		}
+	}
+	return total
 }
 
-func (am *AudioMeter) parseEbur128(reader io.Reader) {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 4096), 4096)
-	for scanner.Scan() {
-		line := scanner.Text()
-		matches := ebur128Re.FindStringSubmatch(line)
-		if len(matches) >= 4 {
-			m, _ := strconv.ParseFloat(matches[1], 64)
-			pl, _ := strconv.ParseFloat(matches[2], 64)
-			pr, _ := strconv.ParseFloat(matches[3], 64)
-			if m < -70 { m = -70 }
-			if pl < -70 { pl = -70 }
-			if pr < -70 { pr = -70 }
+// estimateLoop runs every second and converts byte throughput to estimated dB levels.
+// This provides a "good enough" indicator for the dashboard without any audio decoding.
+//
+// Mapping logic:
+//   - 0 bytes/s          → silence (-70 dB)
+//   - >0 but <2KB/s      → very quiet (-50 dB)
+//   - 2-8KB/s            → quiet (-40 to -30 dB)
+//   - 8-16KB/s           → normal (-24 to -12 dB)
+//   - >16KB/s            → loud (-12 to -3 dB)
+//
+// These thresholds are tuned for AAC 128kbps stereo (~16KB/s at full volume).
+func (am *AudioMeter) estimateLoop() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-am.stopCh:
+			return
+		case <-ticker.C:
+			bytesPerSec := am.audioBytes.Swap(0)
+			level := bytesToEstimatedDB(bytesPerSec)
+
 			am.mu.Lock()
-			am.momentary = m
-			am.peakL = pl
-			am.peakR = pr
+			am.peakL = level
+			am.peakR = level
+			am.momentary = level
 			am.mu.Unlock()
 		}
+	}
+}
+
+// bytesToEstimatedDB converts audio bytes/second to an estimated dB level.
+// This is NOT a real audio measurement — it's a presence/activity indicator.
+func bytesToEstimatedDB(bytesPerSec uint64) float64 {
+	if bytesPerSec == 0 {
+		return -70.0 // Silence
+	}
+
+	// AAC 128kbps stereo = ~16000 bytes/sec of audio payload
+	// Map linearly in log scale:
+	//   100 bytes/s  → -50 dB (minimal data, likely padding)
+	//   16000 bytes/s → -6 dB (full bitrate = normal audio)
+	kbps := float64(bytesPerSec) * 8.0 / 1000.0 // Convert to kbps
+
+	switch {
+	case kbps < 1:
+		return -60.0
+	case kbps < 16:
+		return -50.0
+	case kbps < 48:
+		return -40.0
+	case kbps < 96:
+		return -24.0
+	case kbps < 128:
+		return -12.0
+	default:
+		return -6.0
 	}
 }
 
