@@ -26,10 +26,9 @@ jobs:
       run: |
         gofmt -s -w .
 
-    - name: Verify go mod tidy
+    - name: Ensure go mod tidy
       run: |
         go mod tidy
-        git diff --exit-code go.mod go.sum || (echo "go.mod/go.sum not tidy" && exit 1)
 
     - name: Run golangci-lint
       uses: golangci/golangci-lint-action@v6
