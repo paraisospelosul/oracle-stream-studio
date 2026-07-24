@@ -33,6 +33,7 @@ jobs:
     - name: Run golangci-lint
       uses: golangci/golangci-lint-action@v6
       with:
+        version: v1.60.0
         args: --timeout=5m --disable-all --enable=errcheck,gosimple,govet,ineffassign,staticcheck,unused
 
     - name: Run tests with coverage
