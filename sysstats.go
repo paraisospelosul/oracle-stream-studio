@@ -37,7 +37,7 @@ func (m *SysStatsMonitor) GetStats() SystemStats {
 }
 
 func (m *SysStatsMonitor) Start(ctx context.Context) {
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for {

@@ -218,8 +218,8 @@ type Switcher struct {
 	lowBitrateStart time.Time
 	inLowBitrate    bool
 
-	// Bitrate history ring buffer (36000 = 10 hours at 1/sec)
-	bitrateHistory    [36000]float64
+	// Bitrate history ring buffer (7200 = 2 hours at 1/sec)
+	bitrateHistory    [7200]float64
 	bitrateHistoryIdx int
 	bitrateHistoryLen int
 	bitrateHistoryMu  sync.RWMutex
@@ -378,8 +378,7 @@ func (s *Switcher) getBitrateHistory() map[string][]float64 {
 		"5m":  s.getBitrateHistoryForWindow(300),
 		"30m": s.getBitrateHistoryForWindow(1800),
 		"1h":  s.getBitrateHistoryForWindow(3600),
-		"5h":  s.getBitrateHistoryForWindow(18000),
-		"10h": s.getBitrateHistoryForWindow(36000),
+		"5h":  s.getBitrateHistoryForWindow(7200),
 	}
 }
 
@@ -401,7 +400,7 @@ func (s *Switcher) getBitrateHistoryForWindow(seconds int) []float64 {
 	}
 
 	result := make([]float64, targetPoints)
-	start := (s.bitrateHistoryIdx - lookback + 36000) % 36000
+	start := (s.bitrateHistoryIdx - lookback + 7200) % 7200
 	pointsPerBucket := float64(lookback) / float64(targetPoints)
 
 	for i := 0; i < targetPoints; i++ {
@@ -413,7 +412,7 @@ func (s *Switcher) getBitrateHistoryForWindow(seconds int) []float64 {
 
 		var sum float64
 		for j := bucketStart; j < bucketEnd; j++ {
-			sum += s.bitrateHistory[(start+j)%36000]
+			sum += s.bitrateHistory[(start+j)%7200]
 		}
 		count := bucketEnd - bucketStart
 		if count > 0 {
@@ -1082,8 +1081,8 @@ func (s *Switcher) bitrateLoop(ctx context.Context) {
 			s.currentBitrateKbps.Store(kbps)
 			s.bitrateHistoryMu.Lock()
 			s.bitrateHistory[s.bitrateHistoryIdx] = float64(kbps)
-			s.bitrateHistoryIdx = (s.bitrateHistoryIdx + 1) % 36000
-			if s.bitrateHistoryLen < 36000 {
+			s.bitrateHistoryIdx = (s.bitrateHistoryIdx + 1) % 7200
+			if s.bitrateHistoryLen < 7200 {
 				s.bitrateHistoryLen++
 			}
 			s.bitrateHistoryMu.Unlock()
