@@ -84,7 +84,7 @@ func (am *AudioMeter) countAudioBytes() {
 			if !ok {
 				return
 			}
-			audioPID := am.switcher.audioPID
+			audioPID := uint16(am.switcher.audioPID.Load())
 			if audioPID == 0 {
 				continue
 			}

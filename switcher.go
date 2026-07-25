@@ -196,10 +196,10 @@ type Switcher struct {
 	stateMu sync.RWMutex
 	startTime time.Time
 
-	// MPEGTS PIDs
-	videoPID uint16
-	audioPID uint16
-	pmtPID   uint16
+	// MPEGTS PIDs (atomic to avoid data race between SRT listener, remapper ticker, GetStats, and audiometer)
+	videoPID atomic.Uint32
+	audioPID atomic.Uint32
+	pmtPID   atomic.Uint32
 
 	// Stats
 	packetsReceived   atomic.Uint64
@@ -458,8 +458,8 @@ func (s *Switcher) GetStats() SwitcherStats {
 		SwitchCount:       s.switchCount.Load(),
 		LastSwitchTime:    lastSwitchStr,
 		Uptime:            uptimeStr,
-		VideoPID:          s.videoPID,
-		AudioPID:          s.audioPID,
+		VideoPID:          uint16(s.videoPID.Load()),
+		AudioPID:          uint16(s.audioPID.Load()),
 		BitrateHistory:    s.getBitrateHistory(),
 		RecentEvents:      recentEvents,
 		Pipelines:         s.router.GetPipelineStats(),
@@ -634,8 +634,8 @@ func (s *Switcher) Run(ctx context.Context) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if s.videoPID != 0 {
-					s.remapper.SetPIDs(s.videoPID, s.audioPID, s.pmtPID)
+				if s.videoPID.Load() != 0 {
+					s.remapper.SetPIDs(uint16(s.videoPID.Load()), uint16(s.audioPID.Load()), uint16(s.pmtPID.Load()))
 				}
 			}
 		}
@@ -1007,22 +1007,22 @@ func (s *Switcher) processPackets(data []byte) {
 		}
 		if info.PID == patPID && info.PUSI && info.HasPayload {
 			if pmtPID := ParsePAT(pkt[info.PayloadOffset:]); pmtPID != 0 {
-				s.pmtPID = pmtPID
+				s.pmtPID.Store(uint32(pmtPID))
 			}
 		}
-		if info.PID == s.pmtPID && s.pmtPID != 0 && info.PUSI && info.HasPayload {
+		if info.PID == uint16(s.pmtPID.Load()) && s.pmtPID.Load() != 0 && info.PUSI && info.HasPayload {
 			vPID, aPID := ParsePMT(pkt[info.PayloadOffset:])
 			if vPID != 0 {
-				if s.videoPID != vPID {
+				if uint16(s.videoPID.Load()) != vPID {
 					log.Printf("[switcher] Video PID: %d", vPID)
 				}
-				s.videoPID = vPID
+				s.videoPID.Store(uint32(vPID))
 			}
 			if aPID != 0 {
-				if s.audioPID != aPID {
+				if uint16(s.audioPID.Load()) != aPID {
 					log.Printf("[switcher] Audio PID: %d", aPID)
 				}
-				s.audioPID = aPID
+				s.audioPID.Store(uint32(aPID))
 			}
 		}
 	}
@@ -1039,27 +1039,27 @@ func (s *Switcher) containsKeyframe(data []byte) bool {
 		// PAT → extract PMT PID
 		if info.PID == patPID && info.PUSI && info.HasPayload {
 			if pmtPID := ParsePAT(pkt[info.PayloadOffset:]); pmtPID != 0 {
-				s.pmtPID = pmtPID
+				s.pmtPID.Store(uint32(pmtPID))
 			}
 		}
 		// PMT → extract video/audio PIDs
-		if info.PID == s.pmtPID && s.pmtPID != 0 && info.PUSI && info.HasPayload {
+		if info.PID == uint16(s.pmtPID.Load()) && s.pmtPID.Load() != 0 && info.PUSI && info.HasPayload {
 			vPID, aPID := ParsePMT(pkt[info.PayloadOffset:])
 			if vPID != 0 {
-				if s.videoPID != vPID {
+				if uint16(s.videoPID.Load()) != vPID {
 					log.Printf("[switcher] Video PID: %d", vPID)
 				}
-				s.videoPID = vPID
+				s.videoPID.Store(uint32(vPID))
 			}
 			if aPID != 0 {
-				if s.audioPID != aPID {
+				if uint16(s.audioPID.Load()) != aPID {
 					log.Printf("[switcher] Audio PID: %d", aPID)
 				}
-				s.audioPID = aPID
+				s.audioPID.Store(uint32(aPID))
 			}
 		}
 		// Keyframe detection on video PID
-		if info.PID == s.videoPID && s.videoPID != 0 && info.PUSI && info.HasPayload {
+		if info.PID == uint16(s.videoPID.Load()) && s.videoPID.Load() != 0 && info.PUSI && info.HasPayload {
 			pesPayload := ExtractPESPayload(pkt, info.PayloadOffset)
 			if pesPayload != nil && IsKeyframe(pesPayload) {
 				s.keyframesDetected.Add(1)
@@ -1093,13 +1093,13 @@ func (s *Switcher) bitrateLoop(ctx context.Context) {
 }
 
 func (s *Switcher) containsVideo(data []byte) bool {
-	if s.videoPID == 0 {
+	if s.videoPID.Load() == 0 {
 		return true
 	}
 	for offset := 0; offset+tsPacketSize <= len(data); offset += tsPacketSize {
 		pkt := data[offset : offset+tsPacketSize]
 		info, ok := ParseTSPacket(pkt)
-		if ok && info.PID == s.videoPID {
+		if ok && info.PID == uint16(s.videoPID.Load()) {
 			return true
 		}
 	}
