@@ -352,6 +352,11 @@ func (o *Output) runProcess(broadcaster *Broadcaster) {
 
 func (o *Output) writeLoop() {
 	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[output %s] PANIC RECOVERED in writeLoop: %v", o.config.ID, r)
+		}
+	}()
+	defer func() {
 		if v := o.stdinRef.Load(); v != nil {
 			if wrapper, ok := v.(*stdinWrapper); ok && wrapper.pipe != nil {
 				wrapper.pipe.Close()

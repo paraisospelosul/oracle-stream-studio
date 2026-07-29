@@ -57,7 +57,7 @@ func (am *AudioMeter) Start() {
 	go am.countAudioBytes()
 
 	// Goroutine 2: estimate levels every second from byte count
-	am.estimateLoop()
+	go am.estimateLoop()
 }
 
 func (am *AudioMeter) Stop() {

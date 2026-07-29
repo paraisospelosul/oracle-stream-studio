@@ -597,6 +597,11 @@ func (s *Switcher) checkBitrateThreshold() bool {
 }
 
 func (s *Switcher) Run(ctx context.Context) error {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[switcher] PANIC RECOVERED in Run: %v", r)
+		}
+	}()
 	s.startTime = time.Now()
 	log.Println("[switcher] Starting with advanced pipeline routing...")
 

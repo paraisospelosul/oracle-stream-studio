@@ -68,7 +68,7 @@ func (r *Recorder) GetStatus() RecordingStatus {
 }
 
 func (r *Recorder) Start() error {
-	if r.recording.Load() {
+	if !r.recording.CompareAndSwap(false, true) {
 		return fmt.Errorf("already recording")
 	}
 
@@ -90,7 +90,6 @@ func (r *Recorder) Start() error {
 	r.stopCh = make(chan struct{})
 	r.mu.Unlock()
 
-	r.recording.Store(true)
 	go r.recordLoop()
 
 	log.Printf("[recorder] Started recording to %s", tsPath)
@@ -145,6 +144,11 @@ func (r *Recorder) Stop() error {
 }
 
 func (r *Recorder) recordLoop() {
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[recorder] PANIC RECOVERED in recordLoop: %v", rec)
+		}
+	}()
 	subID := "recorder_internal"
 	dataCh := r.broadcaster.Subscribe(subID)
 	defer r.broadcaster.Unsubscribe(subID)
