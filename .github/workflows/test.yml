@@ -16,7 +16,7 @@ jobs:
       uses: actions/setup-go@v5
       with:
         go-version: 'stable'
-        cache: true
+        cache: false
 
     - name: Install system ZeroMQ headers if needed & tidy modules
       run: go mod tidy

@@ -47,7 +47,7 @@ sudo bash scripts/install.sh
 O novo instalador `v2.0` detecta automaticamente a arquitetura (`ARM64` Ampere ou `AMD64`) e busca sempre as **versões mais recentes** em tempo real:
 - **Go:** consulta a última versão estável oficial em `go.dev/VERSION`.
 - **FFmpeg + FFprobe:** baixa a última build estática GPL (`BtbN/FFmpeg-Builds`) com suporte completo a Enhanced RTMP H.265.
-- **Belabox Receiver (`bbox`):** descobre a última release no GitHub/Docker Hub **ou** permite compilar direto do código-fonte mais recente (`HEAD`) da `IRLServer` (`srt` + `srtla` + `irl-srt-server`), rodando em `network_mode: "host"`.
+- **Belabox Receiver (`bbox`):** descobre automaticamente a última tag publicada de `datagutt/belabox-receiver` no Docker Hub, rodando em `network_mode: "host"`.
 - **Tuning de Rede:** opção integrada para ativar `TCP BBR` e buffers UDP de `16 MB` (`scripts/optimize_kernel.sh`).
 
 Para atualizar tudo (código, Go, FFmpeg, Bbox e bibliotecas) no futuro com um comando:

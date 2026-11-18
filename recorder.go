@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+const recorderSubID = "recorder_internal"
+
 // Recorder records the broadcaster stream to a .ts file using buffered I/O, then remuxes to .mp4 on stop
 type Recorder struct {
 	broadcaster *Broadcaster
@@ -87,6 +89,9 @@ func (r *Recorder) Start() error {
 	stopCh := make(chan struct{})
 	doneCh := make(chan struct{})
 
+	// Subscribe synchronously before returning so immediate Broadcast() calls never miss packets
+	dataCh := r.broadcaster.Subscribe(recorderSubID)
+
 	r.mu.Lock()
 	r.tsPath = tsPath
 	r.mp4Path = mp4Path
@@ -97,7 +102,7 @@ func (r *Recorder) Start() error {
 	r.doneCh = doneCh
 	r.mu.Unlock()
 
-	go r.recordLoop(f, stopCh, doneCh)
+	go r.recordLoop(f, dataCh, stopCh, doneCh)
 
 	log.Printf("[recorder] Started recording to %s", tsPath)
 	return nil
@@ -158,23 +163,17 @@ func (r *Recorder) Stop() error {
 	return nil
 }
 
-func (r *Recorder) recordLoop(f *os.File, stopCh, doneCh chan struct{}) {
+func (r *Recorder) recordLoop(f *os.File, dataCh chan []byte, stopCh, doneCh chan struct{}) {
 	defer close(doneCh)
 	defer func() {
 		if rec := recover(); rec != nil {
 			log.Printf("[recorder] PANIC RECOVERED in recordLoop: %v", rec)
 		}
 	}()
-
-	subID := "recorder_internal"
-	dataCh := r.broadcaster.Subscribe(subID)
-	defer r.broadcaster.Unsubscribe(subID)
+	defer r.broadcaster.Unsubscribe(recorderSubID)
 
 	bufWriter := bufio.NewWriterSize(f, 256*1024)
 	defer bufWriter.Flush()
-
-	flushTicker := time.NewTicker(20 * time.Millisecond)
-	defer flushTicker.Stop()
 
 	const (
 		maxSizeMB    = 10240
@@ -185,8 +184,6 @@ func (r *Recorder) recordLoop(f *os.File, stopCh, doneCh chan struct{}) {
 	r.mu.RLock()
 	startTime := r.startTime
 	r.mu.RUnlock()
-
-	dirty := false
 
 	for {
 		select {
@@ -210,14 +207,11 @@ func (r *Recorder) recordLoop(f *os.File, stopCh, doneCh chan struct{}) {
 				log.Printf("[recorder] Write error: %v", err)
 				return
 			}
-			dirty = true
-			r.fileSize.Add(uint64(n))
-
-		case <-flushTicker.C:
-			if dirty {
+			// Coalesce queued bursts in RAM; flush once burst drains so disk stays up-to-date
+			if len(dataCh) == 0 {
 				_ = bufWriter.Flush()
-				dirty = false
 			}
+			r.fileSize.Add(uint64(n))
 
 		case <-stopCh:
 			return

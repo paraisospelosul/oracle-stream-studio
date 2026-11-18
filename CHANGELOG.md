@@ -15,7 +15,7 @@ All notable changes to this project will be documented in this file.
   - Detecta automaticamente `ARM64` (`aarch64`) vs `AMD64` (`x86_64`).
   - Busca dinamicamente a **última versão estável do Go** em `go.dev/VERSION`.
   - Baixa a **build estática GPL mais recente do FFmpeg + FFprobe** (`BtbN/FFmpeg-Builds`) com suporte atualizado a Enhanced RTMP (H.265).
-  - Consulta as APIs do GitHub e Docker Hub para instalar a **última versão do Belabox Receiver (`bbox`)** ou compilar localmente direto do `HEAD` dos repositórios `IRLServer` (`srt` + `srtla` + `irl-srt-server`), além de botão **`⬆ Atualizar Bbox`** direto no Painel Web.
+  - Consulta as APIs do GitHub e Docker Hub para instalar sempre a **última versão oficial do container Belabox Receiver (`bbox`)**, além de botão **`⬆ Atualizar Bbox`** direto no Painel Web.
 
 ### Changed
 - **Passthrough Puro de Áudio + Vídeo no H.265 (`output.go`)**: Alterado `-c:a aac` para `-c:a copy` no modo H.265 Passthrough e removido `-use_wallclock_as_timestamps 1` (evitando quebra na ordem de apresentação dos B-frames do encoder de hardware do iPhone).

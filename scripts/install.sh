@@ -8,10 +8,9 @@
 # 3. Instalação da build estática mais recente do FFmpeg + FFprobe (BtbN/FFmpeg-Builds)
 #    com suporte completo a Enhanced RTMP (H.265), libx265, libsrt e libzmq
 #    (evitando o FFmpeg antigo dos repositórios apt padrão do Ubuntu).
-# 4. Seletor inteligente do Belabox SRTLA Receiver (bbox):
-#    - Consulta a API do GitHub/Docker Hub em tempo real para descobrir a última tag;
-#    - Permite usar a imagem oficial mais recente (pull_policy: always) OU compilar
-#      direto do último commit (HEAD) dos repositórios IRLServer (srt + srtla + sls)!
+# 4. Container Docker do Belabox Receiver (bbox):
+#    - Consulta a API do Docker Hub/GitHub em tempo real para descobrir a última versão;
+#    - Permite usar a versão mais recente automaticamente (pull_policy: always) ou escolher a tag.
 # 5. Container bbox otimizado para 2 OCPUs (network_mode: "host" sem overhead de NAT UDP,
 #    cpus: "0.5", mem_limit: 512m e rotação de logs).
 # 6. Opção de atualizar dependências do Go (go get -u) e aplicar tuning de Kernel (BBR + buffers UDP).
@@ -284,61 +283,19 @@ if [ -n "$LATEST_BBOX_RELEASE" ]; then
 fi
 
 echo ""
-echo "  Versões detectadas do Belabox Receiver (datagutt/belabox-receiver):"
-echo "  -> Última Release GitHub: ${LATEST_BBOX_RELEASE:-desconhecida}"
-echo "  -> Tags recentes no Docker Hub: ${RECENT_DOCKER_TAGS:-latest}"
+echo "  Versões detectadas do Belabox Receiver (datagutt/belabox-receiver no Docker):"
+echo "  -> Última versão oficial: ${RECOMMENDED_BBOX_TAG}"
+echo "  -> Tags disponíveis no Docker Hub: ${RECENT_DOCKER_TAGS:-latest}"
 echo ""
-echo "  Como deseja instalar/atualizar o Bbox?"
-echo "    [1] Imagem Docker Oficial Mais Recente (datagutt/belabox-receiver:${RECOMMENDED_BBOX_TAG} — Recomendado)"
-echo "    [2] Compilar Localmente do Código-Fonte Mais Novo (IRLServer Git HEAD: srt + srtla + irl-srt-server)"
-echo "    [3] Escolher/digitar uma tag manualmente (ex: latest ou ${LATEST_BBOX_RELEASE:-3.7.1})"
-BBOX_MODE="$(ask_choice "Escolha o modo do Bbox (1/2/3)" "1")"
+BBOX_TAG_CHOICE="$(ask_choice "Qual tag da imagem datagutt/belabox-receiver deseja usar no Docker?" "${RECOMMENDED_BBOX_TAG}")"
+BBOX_IMAGE="datagutt/belabox-receiver:${BBOX_TAG_CHOICE}"
 
-BBOX_IMAGE="datagutt/belabox-receiver:${RECOMMENDED_BBOX_TAG}"
-BBOX_PULL_POLICY="always"
-
-case "$BBOX_MODE" in
-  2)
-    log "Compilando Bbox localmente a partir do código-fonte mais recente da IRLServer..."
-    BBOX_BUILD_DIR="$(mktemp -d)"
-    git clone --depth 1 https://github.com/datagutt/bbox-receiver.git "$BBOX_BUILD_DIR"
-
-    # Descobre os últimos hashes (HEAD) em tempo real nos repositórios IRLServer
-    SRT_HEAD="$(git ls-remote https://github.com/IRLServer/srt.git refs/heads/belabox-dev | awk '{print $1}' || true)"
-    [ -z "$SRT_HEAD" ] && SRT_HEAD="$(git ls-remote https://github.com/IRLServer/srt.git refs/heads/belabox | awk '{print $1}' || true)"
-    SRTLA_HEAD="$(git ls-remote https://github.com/IRLServer/srtla.git refs/heads/main | awk '{print $1}' || true)"
-    SLS_HEAD="$(git ls-remote https://github.com/IRLServer/irl-srt-server.git refs/heads/main | awk '{print $1}' || true)"
-
-    BUILD_ARGS=()
-    [ -n "$SRT_HEAD" ]   && BUILD_ARGS+=(--build-arg "BELABOX_SRT_VERSION=${SRT_HEAD}")
-    [ -n "$SRTLA_HEAD" ] && BUILD_ARGS+=(--build-arg "SRTLA_VERSION=${SRTLA_HEAD}")
-    [ -n "$SLS_HEAD" ]   && BUILD_ARGS+=(--build-arg "SRT_LIVE_SERVER_VERSION=${SLS_HEAD}")
-
-    log "Hashes IRLServer HEAD: SRT=${SRT_HEAD:0:8} | SRTLA=${SRTLA_HEAD:0:8} | SLS=${SLS_HEAD:0:8}"
-    if docker build "${BUILD_ARGS[@]}" -t bbox-local:latest "$BBOX_BUILD_DIR"; then
-      BBOX_IMAGE="bbox-local:latest"
-      BBOX_PULL_POLICY="never"
-      log "Imagem bbox-local:latest compilada com sucesso!"
-    else
-      warn "Falha na compilação local; usando imagem oficial ${BBOX_IMAGE} como fallback."
-    fi
-    rm -rf "$BBOX_BUILD_DIR"
-    ;;
-  3)
-    CUSTOM_TAG="$(ask_choice "Digite a tag desejada para datagutt/belabox-receiver" "${RECOMMENDED_BBOX_TAG}")"
-    BBOX_IMAGE="datagutt/belabox-receiver:${CUSTOM_TAG}"
-    ;;
-  *)
-    BBOX_IMAGE="datagutt/belabox-receiver:${RECOMMENDED_BBOX_TAG}"
-    ;;
-esac
-
-# Otimizado para 2 OCPUs: network_mode: "host" elimina overhead de NAT/conntrack nos pacotes UDP SRTLA!
+# Monta o docker-compose.yml do container bbox (otimizado p/ 2 OCPUs com network_mode: host)
 cat << EOF > docker-compose.yml
 services:
   bbox:
     image: ${BBOX_IMAGE}
-    pull_policy: ${BBOX_PULL_POLICY}
+    pull_policy: always
     container_name: bbox
     restart: unless-stopped
     network_mode: "host"
@@ -383,11 +340,10 @@ fi
 
 log "Subindo container Bbox (${BBOX_IMAGE})..."
 if docker compose version &>/dev/null; then
-  if [ "$BBOX_PULL_POLICY" = "always" ]; then
-    docker compose pull || true
-  fi
+  docker compose pull || true
   docker compose up -d --force-recreate
 else
+  docker-compose pull || true
   docker-compose up -d --force-recreate
 fi
 
