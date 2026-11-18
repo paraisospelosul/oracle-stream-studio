@@ -353,6 +353,7 @@ func (o *Output) runProcess(broadcaster *Broadcaster, stopCh chan struct{}) {
 	o.mu.Lock()
 	if o.cmd == cmd {
 		o.running.Store(false)
+		o.cmd = nil
 		if o.zmqClient != nil {
 			o.zmqClient.Close()
 			o.zmqClient = nil
@@ -431,6 +432,7 @@ func (o *Output) Stop() {
 	}
 
 	if o.cmd != nil && o.cmd.Process != nil {
+		// Error (e.g. os.ErrProcessDone) is intentionally ignored if FFmpeg exited right before Stop acquired o.mu.
 		_ = o.cmd.Process.Kill()
 	}
 	if o.zmqClient != nil {

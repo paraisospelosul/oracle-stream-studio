@@ -39,6 +39,10 @@ All notable changes to this project will be documented in this file.
 - **Proteção e Timeout no Remux de Gravações (`recorder.go`)**: Adicionados `context.WithTimeout` (5 minutos) via `exec.CommandContext` e `setProcessDeathSignal(cmd)` no remux `.ts -> .mp4`, prevenindo processos FFmpeg órfãos ou travados.
 - **Alinhamento de Toolchain (`go.mod`), Sanitização JS (`web/app.js`) & Novos Testes (`scenes_test.go`, `preview_test.go`, `recorder_test.go`, `switcher_test.go`)**: Atualizado `go.mod` para `go 1.23`, adicionado `encodeURIComponent` nos endpoints restantes de saídas no JS e expandida a suíte de testes unitários para cobrir `SceneManager`, `PreviewManager`, deduplicação do `Recorder` e segurança de geração do `Broadcaster`.
 
+### Fixed (Polimento v2.0.3)
+- **Limpeza e Documentação em `Output.Stop()` / `runProcess()` (`output.go`)**: Limpeza de `o.cmd = nil` após `cmd.Wait()` e documentação explícita do tratamento seguro de `os.ErrProcessDone` em `Process.Kill()`.
+- **Remoção da Janela Redundante `"5h"` no Histórico de Bitrate (`switcher.go`, `switcher_test.go`)**: Removida a chave `"5h"` duplicada do mapa `getBitrateHistory()` (alinhando ao ring buffer real de 2h / `7200s` e ao seletor da Web UI, economizando varredura e serialização JSON a cada segundo).
+
 ### Removed
 - Removidos módulos pesados ou inacabados sem uso prático em 2 OCPUs (~2.500 linhas eliminadas): `audiometer.go`, `transcoding_bridge.go` (evitando pico de 100% de CPU com `libx265` na reconexão), `transitions.go`, `pipeline_router.go` (ticker de 200 Hz), `autoswitch.go` e `scheduler.go`.
 

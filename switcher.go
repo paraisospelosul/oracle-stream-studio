@@ -530,7 +530,6 @@ func (s *Switcher) getBitrateHistory() map[string][]float64 {
 		"30m": s.getBitrateHistoryForWindow(1800),
 		"1h":  s.getBitrateHistoryForWindow(3600),
 		"2h":  s.getBitrateHistoryForWindow(7200),
-		"5h":  s.getBitrateHistoryForWindow(7200),
 	}
 }
 

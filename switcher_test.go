@@ -104,6 +104,14 @@ func TestSwitcher_BitrateHistory(t *testing.T) {
 	if hist1m[0] < 1000 || hist1m[0] > 1600 {
 		t.Errorf("Bitrate history average out of range: %f", hist1m[0])
 	}
+
+	all := switcher.getBitrateHistory()
+	if _, exists := all["5h"]; exists {
+		t.Error("Did not expect unused '5h' window exceeding 2h ring buffer capacity")
+	}
+	if len(all) != 5 {
+		t.Errorf("Expected 5 history windows (1m..2h), got %d", len(all))
+	}
 }
 
 func TestSwitcher_PacketInspection(t *testing.T) {
