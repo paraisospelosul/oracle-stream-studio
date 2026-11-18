@@ -35,6 +35,7 @@ type SceneManager struct {
 	activeClip atomic.Pointer[SlateClip]
 
 	mu            sync.RWMutex
+	saveMu        sync.Mutex
 	configPath    string
 	dataDir       string
 	onSceneChange func()
@@ -102,7 +103,7 @@ func (sm *SceneManager) discoverOrCreateDefaultScene() {
 			}
 			sm.scenes = append(sm.scenes, sc)
 			sm.activeID = "default"
-			sm.saveConfig()
+			sm.persistConfig()
 			log.Printf("[scenes] Registered default scene from %s", p)
 			return
 		}
@@ -124,7 +125,7 @@ func (sm *SceneManager) discoverOrCreateDefaultScene() {
 	}
 	sm.scenes = append(sm.scenes, sc)
 	sm.activeID = "default"
-	sm.saveConfig()
+	sm.persistConfig()
 }
 
 // prepareAllScenesOnBoot ensures every registered scene has a compiled .ts and is loaded in RAM
@@ -182,8 +183,8 @@ func (sm *SceneManager) prepareAllScenesOnBoot() {
 	if clip, ok := sm.clips[sm.activeID]; ok {
 		sm.activeClip.Store(clip)
 	}
-	sm.saveConfig()
 	sm.mu.Unlock()
+	sm.persistConfig()
 }
 
 // GetActiveClip returns the currently active RAM SlateClip via lock-free atomic load
@@ -208,10 +209,10 @@ func (sm *SceneManager) SetResolution(res string) {
 		return
 	}
 	sm.resolution = res
-	sm.saveConfig()
 	scenesCopy := make([]Scene, len(sm.scenes))
 	copy(scenesCopy, sm.scenes)
 	sm.mu.Unlock()
+	sm.persistConfig()
 
 	go func() {
 		w, h := ParseFallbackResolution(res)
@@ -272,8 +273,8 @@ func (sm *SceneManager) reloadSceneClip(id, tsPath, thumbPath string, w, h int) 
 		sm.activeClip.Store(clip)
 		notify = true
 	}
-	sm.saveConfig()
 	sm.mu.Unlock()
+	sm.persistConfig()
 
 	if notify && sm.onSceneChange != nil {
 		sm.onSceneChange()
@@ -374,8 +375,8 @@ func (sm *SceneManager) AddAndCompileScene(name, uploadedPath string, activateNo
 		sm.activeClip.Store(clip)
 		notify = true
 	}
-	sm.saveConfig()
 	sm.mu.Unlock()
+	sm.persistConfig()
 
 	log.Printf("[scenes] Added & loaded RAM scene '%s' (%s): %d frames, %.1f KB", name, id, scene.Frames, float64(scene.RAMBytes)/1024.0)
 	if notify && sm.onSceneChange != nil {
@@ -416,8 +417,8 @@ func (sm *SceneManager) RemoveScene(id string) error {
 		}
 		switched = true
 	}
-	sm.saveConfig()
 	sm.mu.Unlock()
+	sm.persistConfig()
 
 	// Clean up files on disk outside lock
 	for _, p := range []string{removed.FilePath, removed.OrigPath, removed.ThumbPath} {
@@ -454,8 +455,8 @@ func (sm *SceneManager) ActivateScene(id string) error {
 
 	sm.activeID = id
 	sm.activeClip.Store(clip)
-	sm.saveConfig()
 	sm.mu.Unlock()
+	sm.persistConfig()
 
 	log.Printf("[scenes] Instant RAM switch to scene: %s", id)
 	if sm.onSceneChange != nil {
@@ -464,12 +465,21 @@ func (sm *SceneManager) ActivateScene(id string) error {
 	return nil
 }
 
-func (sm *SceneManager) saveConfig() {
+// persistConfig serializes and writes scenes.json outside sm.mu so disk I/O never stalls 30fps readers.
+func (sm *SceneManager) persistConfig() {
+	sm.saveMu.Lock()
+	defer sm.saveMu.Unlock()
+
+	sm.mu.RLock()
+	scenesCopy := make([]Scene, len(sm.scenes))
+	copy(scenesCopy, sm.scenes)
 	cfg := scenesConfig{
-		Scenes:     sm.scenes,
+		Scenes:     scenesCopy,
 		ActiveID:   sm.activeID,
 		Resolution: sm.resolution,
 	}
+	sm.mu.RUnlock()
+
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		log.Printf("[scenes] Save error: %v", err)

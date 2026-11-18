@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -171,5 +172,69 @@ func TestOutputManager_Overlay(t *testing.T) {
 	err := manager.MoveOverlay("invalid", 10, 10)
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Errorf("Expected 'not found' error for invalid ID, got: %v", err)
+	}
+}
+
+func TestOutput_ConcurrentStartStopAndRestartAll(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "outputs_race.json")
+	broadcaster := NewBroadcaster()
+	manager := NewOutputManager(broadcaster, configPath, tmpDir)
+
+	for _, id := range []string{"out-race-1", "out-race-2"} {
+		cfg := OutputConfig{
+			ID:             id,
+			Name:           id,
+			URL:            "rtmp://127.0.0.1:19999/live",
+			StreamKey:      "testkey",
+			Codec:          CodecH265Passthrough,
+			Enabled:        true,
+			OverlayEnabled: false,
+		}
+		if err := manager.AddOutput(cfg); err != nil {
+			t.Fatalf("AddOutput(%s) failed: %v", id, err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	for g := 0; g < 4; g++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			id := "out-race-1"
+			if idx%2 == 1 {
+				id = "out-race-2"
+			}
+			for i := 0; i < 4; i++ {
+				_ = manager.StartOutput(id)
+				_ = manager.GetStats()
+				_ = manager.MoveOverlay(id, 20+i, 30+i)
+				_ = manager.StopOutput(id)
+			}
+		}(g)
+	}
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 3; i++ {
+			manager.RestartAll()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 3; i++ {
+			manager.StopAll()
+			_ = manager.GetOutputs()
+		}
+	}()
+
+	wg.Wait()
+	manager.StopAll()
+
+	for _, st := range manager.GetStats() {
+		if st.Running {
+			t.Errorf("Expected output %s to be stopped after StopAll()", st.ID)
+		}
 	}
 }

@@ -142,22 +142,24 @@ func (r *Recorder) Stop() error {
 	mp4Path := r.mp4Path
 	r.mu.Unlock()
 
-	go func() {
-		log.Printf("[recorder] Remuxing %s -> %s", tsPath, mp4Path)
-		cmd := exec.Command("ffmpeg",
-			"-hide_banner", "-loglevel", "error",
-			"-i", tsPath,
-			"-c", "copy",
-			"-movflags", "+faststart",
-			mp4Path,
-		)
-		if err := cmd.Run(); err != nil {
-			log.Printf("[recorder] Remux error: %v (keeping .ts)", err)
-			return
-		}
-		_ = os.Remove(tsPath)
-		log.Printf("[recorder] Remux complete: %s", mp4Path)
-	}()
+	if info, err := os.Stat(tsPath); err == nil && info.Size() >= tsPacketSize {
+		go func() {
+			log.Printf("[recorder] Remuxing %s -> %s", tsPath, mp4Path)
+			cmd := exec.Command("ffmpeg",
+				"-hide_banner", "-loglevel", "error",
+				"-i", tsPath,
+				"-c", "copy",
+				"-movflags", "+faststart",
+				mp4Path,
+			)
+			if err := cmd.Run(); err != nil {
+				log.Printf("[recorder] Remux error: %v (keeping .ts)", err)
+				return
+			}
+			_ = os.Remove(tsPath)
+			log.Printf("[recorder] Remux complete: %s", mp4Path)
+		}()
+	}
 
 	log.Println("[recorder] Stopped recording")
 	return nil

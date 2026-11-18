@@ -16,7 +16,8 @@ document.addEventListener('DOMContentLoaded', () => {
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;');
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 
     // ─── WebSocket ───
@@ -144,7 +145,9 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateAudioBar(audio) {
         audioBarFill.classList.remove('fallback', 'silent');
         if (audio.source === 'live' && audio.active) {
-            const pct = Math.max(15, Math.min(100, Math.round(((audio.bitrate_kbps || 128) / 160) * 100)));
+            const pct = typeof audio.bar_level_pct === 'number'
+                ? audio.bar_level_pct
+                : Math.max(15, Math.min(100, Math.round(((audio.bitrate_kbps || 128) / 160) * 100)));
             audioBarFill.style.width = pct + '%';
             audioBarText.textContent = `${audio.bitrate_kbps} kbps • Áudio OK`;
         } else if (audio.source === 'fallback') {
@@ -578,11 +581,15 @@ document.addEventListener('DOMContentLoaded', () => {
         t.textContent = out.running ? '⏸' : '▶';
     }
 
+    function findOutputCard(id) {
+        return Array.from(document.querySelectorAll('.output-card')).find(c => c.dataset.id === id) || null;
+    }
+
     async function toggleOutput(id) {
-        const card = document.querySelector(`.output-card[data-id="${id}"]`);
+        const card = findOutputCard(id);
         const running = card && card.classList.contains('running');
         try {
-            const res = await fetch(`/api/outputs/${id}/${running ? 'stop' : 'start'}`, { method: 'POST' });
+            const res = await fetch(`/api/outputs/${encodeURIComponent(id)}/${running ? 'stop' : 'start'}`, { method: 'POST' });
             if (res.ok) toast(`Destino ${running ? 'parado' : 'iniciado'}!`, 'success');
             else {
                 const d = await res.json();
@@ -594,7 +601,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function deleteOutput(id) {
         if (!confirm('Excluir este destino RTMP?')) return;
         try {
-            await fetch(`/api/outputs/${id}`, { method: 'DELETE' });
+            await fetch(`/api/outputs/${encodeURIComponent(id)}`, { method: 'DELETE' });
             toast('Destino excluído', 'success');
         } catch (e) { toast(e.message, 'error'); }
     }
@@ -619,7 +626,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function showLogs(id) {
         currentLogsId = id;
-        const card = document.querySelector(`.output-card[data-id="${id}"]`);
+        const card = findOutputCard(id);
         document.getElementById('logs-output-name').textContent = card?.querySelector('.output-name')?.textContent || id;
         document.getElementById('logs-content').textContent = 'Carregando...';
         openModal(document.getElementById('logs-modal'));
@@ -804,9 +811,13 @@ document.addEventListener('DOMContentLoaded', () => {
         previewPlaceholder.style.display = 'none';
         previewImg.style.display = 'block';
         const ms = Math.max(250, Math.floor(1000 / previewFps));
+        let inFlight = false;
         const load = () => {
+            if (inFlight || document.hidden) return;
+            inFlight = true;
             const img = new Image();
-            img.onload = () => { previewImg.src = img.src; };
+            img.onload = () => { inFlight = false; previewImg.src = img.src; };
+            img.onerror = () => { inFlight = false; };
             img.src = '/api/preview/frame?t=' + Date.now();
         };
         load();
@@ -814,10 +825,20 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function syncPreviewStateFromServer(prv) {
-        const serverFps = prv.running ? (prv.fps || 0) : 0;
+        const serverFps = prv.fps || 0;
+        const fpsSelect = document.getElementById('preview-fps');
+        const resSelect = document.getElementById('preview-res');
+        if (prv.width && prv.height && document.activeElement !== resSelect) {
+            const resVal = `${prv.width}x${prv.height}`;
+            if (Array.from(resSelect.options).some(o => o.value === resVal)) {
+                resSelect.value = resVal;
+            }
+        }
         if (serverFps !== previewFps) {
             previewFps = serverFps;
-            document.getElementById('preview-fps').value = String(serverFps);
+            if (document.activeElement !== fpsSelect) {
+                fpsSelect.value = String(serverFps);
+            }
             if (serverFps === 0) stopPreviewPolling();
             else startPreviewPolling();
         }
@@ -941,7 +962,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const targetW = 1920, targetH = 1080;
 
     function updateOverlaySelect(outputs) {
-        if (!overlaySelect) return;
+        if (!overlaySelect || document.activeElement === overlaySelect) return;
         const currentVal = overlaySelect.value;
         const overlayOutputs = outputs.filter(o => o.overlay_enabled);
         if (overlayOutputs.length === 0) {

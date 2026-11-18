@@ -24,6 +24,14 @@ All notable changes to this project will be documented in this file.
 - **Preview Sob Demanda (`preview.go`)**: Inicia desligado (`0 fps` / `0% CPU`) no boot, decodifica apenas keyframes (`-skip_frame nokey -threads 1`) em 1–2 fps e desliga sozinho após 30s sem abas abertas no navegador.
 - **Monitoramento Leve do Docker Bbox (`bbox.go`)**: Removido o polling HTTP a cada 3s do navegador e o duplo fork do `docker compose`; status agora é verificado de forma leve a cada 5s e enviado via WebSocket. Container configurado com `network_mode: "host"` e `cpus: "0.5"`.
 
+### Fixed (Revisão v2.0.1)
+- **Concorrência no `Output.Start()` / `Output.Stop()` (`output.go`, `switcher.go`)**: Sincronizado `stopCh` sob mutex (`stopClosed`), canais `stopCh`/`dataCh` e `stdinPipe` isolados por geração de processo e `Broadcaster.UnsubscribeChannel()` para evitar double-close ou interferência em reinícios rápidos.
+- **Contenção de Lock em `RestartAll` / `StopAll` (`output.go`)**: Coleta das saídas ativas sob `RLock` e execução de `Stop` + `Sleep` + `Start` fora do lock para não travar edições no painel.
+- **Telemetria Honesta na Barra de Áudio (`switcher.go`, `web/app.js`)**: Substituídos campos legados `peak_left_db`/`momentary_lufs` por `bar_level_pct` (`0..100%`).
+- **Compilação Multiplataforma (`sysprocattr_linux.go`, `sysprocattr_other.go`)**: Isolado `Pdeathsig: syscall.SIGKILL` com build tag `linux` permitindo build/testes também no macOS.
+- **Persistência Fora do Lock (`scenes.go`) & Shutdown Limpo (`server.go`)**: Gravação em disco de `scenes.json` movida para fora do mutex `sm.mu` (`persistConfig`) e goroutine do `rateLimiter` encerrada via `ctx.Done()`.
+- **Refinamentos no Painel Web & Testes (`web/app.js`, `*_test.go`, `test.yml`)**: Sincronização estável do FPS do preview durante inicialização do FFmpeg, guarda contra requisições sobrepostas de frames em redes lentas e ativação de `go test -race` no GitHub Actions CI com novos testes de concorrência, B-frames multi-PID e slow subscriber.
+
 ### Removed
 - Removidos módulos pesados ou inacabados sem uso prático em 2 OCPUs (~2.500 linhas eliminadas): `audiometer.go`, `transcoding_bridge.go` (evitando pico de 100% de CPU com `libx265` na reconexão), `transitions.go`, `pipeline_router.go` (ticker de 200 Hz), `autoswitch.go` e `scheduler.go`.
 

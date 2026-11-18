@@ -94,3 +94,55 @@ func TestPTSRemapper_Reset(t *testing.T) {
 		t.Error("Expected remapper to be inactive after Reset()")
 	}
 }
+
+func TestPTSRemapper_MultiPacketBFramesAndAudio(t *testing.T) {
+	remapper := NewPTSRemapper()
+	remapper.SetPIDs(256, 257, 4096)
+
+	// Simulate iPhone Live batch: Video I-frame (PTS=189000, DTS=180000), Audio (PTS=180000),
+	// Video B-frame (PTS=183000, DTS=183000), Video P-frame (PTS=195000, DTS=186000)
+	var liveBatch []byte
+	liveBatch = append(liveBatch, buildTestPESPacket(256, 189000, 180000, true, 3)...)
+	liveBatch = append(liveBatch, buildTestPESPacket(257, 180000, 0, false, 9)...)
+	liveBatch = append(liveBatch, buildTestPESPacket(256, 183000, 183000, true, 4)...)
+	liveBatch = append(liveBatch, buildTestPESPacket(256, 195000, 186000, true, 5)...)
+
+	remapper.Remap(liveBatch)
+
+	// Switch to RAM Slate loop starting at 0 across both Video (256) and Audio (257)
+	remapper.NotifySourceSwitch()
+	var slateBatch []byte
+	slateBatch = append(slateBatch, buildTestPESPacket(256, 3000, 0, true, 0)...)
+	slateBatch = append(slateBatch, buildTestPESPacket(257, 0, 0, false, 0)...)
+	slateBatch = append(slateBatch, buildTestPESPacket(256, 9000, 3000, true, 1)...)
+
+	remapper.Remap(slateBatch)
+
+	// Video had 3 packets in liveBatch (CC 0, 1, 2) -> slateBatch video packets must have CC 3 and 4
+	if ccV0 := slateBatch[3] & 0x0F; ccV0 != 3 {
+		t.Errorf("Expected Video CC=3 after switch, got %d", ccV0)
+	}
+	if ccA0 := slateBatch[tsPacketSize+3] & 0x0F; ccA0 != 1 {
+		t.Errorf("Expected Audio CC=1 after switch, got %d", ccA0)
+	}
+	if ccV1 := slateBatch[2*tsPacketSize+3] & 0x0F; ccV1 != 4 {
+		t.Errorf("Expected second Slate Video CC=4, got %d", ccV1)
+	}
+
+	// Verify B-frame PTS-DTS delta (9000 - 3000 = 6000) is preserved and DTS strictly increases
+	pts0, dts0, ok0 := extractPTSDTS(slateBatch[4:tsPacketSize])
+	pts1, dts1, ok1 := extractPTSDTS(slateBatch[2*tsPacketSize+4 : 3*tsPacketSize])
+	if !ok0 || !ok1 {
+		t.Fatal("Failed to extract PTS/DTS from remapped slate batch")
+	}
+	if dts0 <= 186000 {
+		t.Errorf("Expected remapped DTS (%d) to exceed previous max live DTS (186000)", dts0)
+	}
+	if dts1 <= dts0 {
+		t.Errorf("Expected strictly monotonic DTS: dts0=%d, dts1=%d", dts0, dts1)
+	}
+	if (pts1 - dts1) != 6000 {
+		t.Errorf("Expected B-frame PTS-DTS delta 6000 to be preserved, got %d (pts=%d, dts=%d)", pts1-dts1, pts1, dts1)
+	}
+	_ = pts0
+}

@@ -142,23 +142,29 @@ type rateBucket struct {
 	resetAt time.Time
 }
 
-func newRateLimiter(rate int, window time.Duration) *rateLimiter {
+func newRateLimiter(ctx context.Context, rate int, window time.Duration) *rateLimiter {
 	rl := &rateLimiter{
 		clients: make(map[string]*rateBucket),
 		rate:    rate,
 		window:  window,
 	}
 	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
 		for {
-			time.Sleep(5 * time.Minute)
-			rl.mu.Lock()
-			now := time.Now()
-			for ip, b := range rl.clients {
-				if now.After(b.resetAt) {
-					delete(rl.clients, ip)
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				rl.mu.Lock()
+				now := time.Now()
+				for ip, b := range rl.clients {
+					if now.After(b.resetAt) {
+						delete(rl.clients, ip)
+					}
 				}
+				rl.mu.Unlock()
 			}
-			rl.mu.Unlock()
 		}
 	}()
 	return rl
@@ -317,7 +323,7 @@ func (s *APIServer) Run(ctx context.Context) error {
 
 	go s.broadcastLoop(ctx)
 
-	rl := newRateLimiter(60, 1*time.Second)
+	rl := newRateLimiter(ctx, 60, 1*time.Second)
 	var handler http.Handler = mux
 	handler = s.basicAuthMiddleware(handler)
 	handler = s.corsMiddleware(handler)

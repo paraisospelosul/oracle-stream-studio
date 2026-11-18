@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -58,13 +57,12 @@ type SwitchEvent struct {
 }
 
 // AudioLevels provides zero-CPU audio stream presence and bitrate telemetry
+// derived from MPEG-TS AAC packet headers (no audio decoding / LUFS measurement).
 type AudioLevels struct {
-	Active      bool    `json:"active"`
-	BitrateKbps uint64  `json:"bitrate_kbps"`
-	Source      string  `json:"source"` // "live", "fallback", or "none"
-	PeakL       float64 `json:"peak_left_db"`
-	PeakR       float64 `json:"peak_right_db"`
-	Momentary   float64 `json:"momentary_lufs"`
+	Active      bool   `json:"active"`
+	BitrateKbps uint64 `json:"bitrate_kbps"`
+	Source      string `json:"source"`        // "live", "fallback", or "none"
+	BarLevel    int    `json:"bar_level_pct"` // 0..100 visual bar percentage derived from AAC stream bitrate
 }
 
 // SwitcherStats holds real-time statistics for the Web UI
@@ -126,6 +124,18 @@ func (b *Broadcaster) Unsubscribe(id string) {
 	b.subCount.Store(int32(len(b.subscribers)))
 }
 
+// UnsubscribeChannel removes the subscriber only if its active channel matches target,
+// preventing an exiting generation from unsubscribing a newly restarted generation.
+func (b *Broadcaster) UnsubscribeChannel(id string, target chan []byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if ch, ok := b.subscribers[id]; ok && ch == target {
+		close(ch)
+		delete(b.subscribers, id)
+	}
+	b.subCount.Store(int32(len(b.subscribers)))
+}
+
 func (b *Broadcaster) Broadcast(data []byte) {
 	if b.subCount.Load() == 0 {
 		return
@@ -166,7 +176,7 @@ func (ip *InputProcess) Start() error {
 	ip.mu.Lock()
 	defer ip.mu.Unlock()
 	ip.cmd = exec.Command("ffmpeg", ip.args...)
-	ip.cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	setProcessDeathSignal(ip.cmd)
 	var err error
 	ip.stdout, err = ip.cmd.StdoutPipe()
 	if err != nil {
@@ -469,9 +479,7 @@ func (s *Switcher) GetAudioLevels() AudioLevels {
 			Active:      false,
 			BitrateKbps: 128,
 			Source:      "fallback",
-			PeakL:       -60,
-			PeakR:       -60,
-			Momentary:   -60,
+			BarLevel:    35,
 		}
 	}
 
@@ -480,27 +488,23 @@ func (s *Switcher) GetAudioLevels() AudioLevels {
 			Active:      false,
 			BitrateKbps: 0,
 			Source:      "none",
-			PeakL:       -70,
-			PeakR:       -70,
-			Momentary:   -70,
+			BarLevel:    0,
 		}
 	}
 
-	// Map healthy AAC bitrate (e.g. 64-160 kbps) to a clean visual bar level
-	db := -42.0 + (float64(aKbps)/128.0)*36.0
-	if db > -4.0 {
-		db = -4.0
+	// Map healthy AAC bitrate (e.g. 64-160 kbps) to a 15..100% visual bar level
+	pct := int((aKbps * 100) / 160)
+	if pct < 15 {
+		pct = 15
 	}
-	if db < -55.0 {
-		db = -55.0
+	if pct > 100 {
+		pct = 100
 	}
 	return AudioLevels{
 		Active:      true,
 		BitrateKbps: aKbps,
 		Source:      "live",
-		PeakL:       db,
-		PeakR:       db,
-		Momentary:   db,
+		BarLevel:    pct,
 	}
 }
 

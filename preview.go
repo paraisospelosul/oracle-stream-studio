@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -225,7 +224,7 @@ func (p *PreviewManager) runPreviewProcess(fps, width, height, quality int, stop
 	)
 
 	cmd := exec.Command("ffmpeg", args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	setProcessDeathSignal(cmd)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

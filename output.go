@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -59,19 +58,14 @@ type OutputStats struct {
 	OverlayY          int     `json:"overlay_y"`
 }
 
-type stdinWrapper struct {
-	pipe io.WriteCloser
-}
-
 // Output represents a single RTMP output destination
 type Output struct {
 	config        OutputConfig
 	cmd           *exec.Cmd
-	stdinRef      atomic.Value // stores *stdinWrapper — lock-free access in writeLoop
 	targetRunning atomic.Bool
 	running       atomic.Bool
-	dataCh        chan []byte
 	stopCh        chan struct{}
+	stopClosed    bool
 	mu            sync.Mutex
 
 	// ZMQ Controls
@@ -96,12 +90,17 @@ type Output struct {
 
 func NewOutput(config OutputConfig, dataDir string) *Output {
 	return &Output{
-		config:    config,
-		dataDir:   dataDir,
-		dataCh:    make(chan []byte, 512),
-		stopCh:    make(chan struct{}),
-		logBuffer: make([]string, 0, 50),
+		config:     config,
+		dataDir:    dataDir,
+		stopClosed: true,
+		logBuffer:  make([]string, 0, 50),
 	}
+}
+
+func (o *Output) getConfig() OutputConfig {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.config
 }
 
 func (o *Output) appendLog(line string) {
@@ -132,6 +131,9 @@ func findFreePort() (int, error) {
 }
 
 func (o *Output) buildFFmpegArgs() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
 	rtmpURL := o.config.URL
 	if o.config.StreamKey != "" {
 		rtmpURL = strings.TrimRight(rtmpURL, "/") + "/" + o.config.StreamKey
@@ -220,27 +222,37 @@ func (o *Output) buildFFmpegArgs() []string {
 
 func (o *Output) Start(broadcaster *Broadcaster) error {
 	o.mu.Lock()
-	defer o.mu.Unlock()
-
 	if o.targetRunning.Load() {
-		return fmt.Errorf("output %s already running", o.config.ID)
+		id := o.config.ID
+		o.mu.Unlock()
+		return fmt.Errorf("output %s already running", id)
 	}
 
+	stopCh := make(chan struct{})
+	o.stopCh = stopCh
+	o.stopClosed = false
 	o.targetRunning.Store(true)
-	o.stopCh = make(chan struct{})
+	o.mu.Unlock()
+
 	o.lastErrorMu.Lock()
 	o.lastError = ""
 	o.lastErrorMu.Unlock()
 
-	go o.managerLoop(broadcaster)
-	go o.bitrateLoop()
+	go o.managerLoop(broadcaster, stopCh)
+	go o.bitrateLoop(stopCh)
 
 	return nil
 }
 
-func (o *Output) managerLoop(broadcaster *Broadcaster) {
+func (o *Output) managerLoop(broadcaster *Broadcaster, stopCh chan struct{}) {
 	for o.targetRunning.Load() {
-		o.runProcess(broadcaster)
+		select {
+		case <-stopCh:
+			return
+		default:
+		}
+
+		o.runProcess(broadcaster, stopCh)
 
 		if !o.targetRunning.Load() {
 			break
@@ -249,20 +261,23 @@ func (o *Output) managerLoop(broadcaster *Broadcaster) {
 		o.appendLog("--- FFmpeg exited or crashed, restarting in 3s ---")
 		select {
 		case <-time.After(3 * time.Second):
-		case <-o.stopCh:
+		case <-stopCh:
 			return
 		}
 	}
 }
 
-func (o *Output) runProcess(broadcaster *Broadcaster) {
+func (o *Output) runProcess(broadcaster *Broadcaster, stopCh chan struct{}) {
 	args := o.buildFFmpegArgs()
 
 	o.mu.Lock()
-	o.cmd = exec.Command("ffmpeg", args...)
-	o.cmd.SysProcAttr = &syscall.SysProcAttr{
-		Pdeathsig: syscall.SIGKILL,
+	if !o.targetRunning.Load() || o.stopClosed {
+		o.mu.Unlock()
+		return
 	}
+
+	o.cmd = exec.Command("ffmpeg", args...)
+	setProcessDeathSignal(o.cmd)
 
 	stdinPipe, err := o.cmd.StdinPipe()
 	if err != nil {
@@ -270,7 +285,6 @@ func (o *Output) runProcess(broadcaster *Broadcaster) {
 		o.appendLog(fmt.Sprintf("Pipe error: %v", err))
 		return
 	}
-	o.stdinRef.Store(&stdinWrapper{pipe: stdinPipe})
 
 	stderr, err := o.cmd.StderrPipe()
 	if err != nil {
@@ -287,30 +301,38 @@ func (o *Output) runProcess(broadcaster *Broadcaster) {
 
 	o.running.Store(true)
 	o.startTime = time.Now()
-	o.dataCh = broadcaster.Subscribe(o.config.ID)
+	cfg := o.config
+	zmqPort := o.zmqPort
+	pid := o.cmd.Process.Pid
+	cmd := o.cmd
+	dataCh := broadcaster.Subscribe(cfg.ID)
 
-	if o.config.OverlayEnabled && o.zmqPort > 0 {
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			o.mu.Lock()
-			defer o.mu.Unlock()
-			if !o.running.Load() {
+	if cfg.OverlayEnabled && zmqPort > 0 {
+		go func(port int) {
+			select {
+			case <-time.After(500 * time.Millisecond):
+			case <-stopCh:
 				return
 			}
-			addr := fmt.Sprintf("tcp://127.0.0.1:%d", o.zmqPort)
+			o.mu.Lock()
+			defer o.mu.Unlock()
+			if !o.running.Load() || o.stopClosed {
+				return
+			}
+			addr := fmt.Sprintf("tcp://127.0.0.1:%d", port)
 			o.zmqClient = NewZMQClient(addr)
 			if err := o.zmqClient.Connect(); err != nil {
 				o.appendLog(fmt.Sprintf("ZMQ connect error: %v", err))
 				o.zmqClient = nil
 			} else {
-				o.appendLog(fmt.Sprintf("ZMQ connected on port %d", o.zmqPort))
+				o.appendLog(fmt.Sprintf("ZMQ connected on port %d", port))
 			}
-		}()
+		}(zmqPort)
 	}
 	o.mu.Unlock()
 
-	log.Printf("[output:%s] Started (codec=%s, PID=%d)", o.config.Name, o.config.Codec, o.cmd.Process.Pid)
-	o.appendLog(fmt.Sprintf("--- Started FFmpeg PID %d ---", o.cmd.Process.Pid))
+	log.Printf("[output:%s] Started (codec=%s, PID=%d)", cfg.Name, cfg.Codec, pid)
+	o.appendLog(fmt.Sprintf("--- Started FFmpeg PID %d ---", pid))
 
 	go func() {
 		scanner := bufio.NewScanner(stderr)
@@ -323,17 +345,18 @@ func (o *Output) runProcess(broadcaster *Broadcaster) {
 		}
 	}()
 
-	go o.writeLoop()
+	go o.writeLoop(cfg.ID, stdinPipe, dataCh, stopCh)
 
-	err = o.cmd.Wait()
-	o.running.Store(false)
-
-	broadcaster.Unsubscribe(o.config.ID)
+	err = cmd.Wait()
+	broadcaster.UnsubscribeChannel(cfg.ID, dataCh)
 
 	o.mu.Lock()
-	if o.zmqClient != nil {
-		o.zmqClient.Close()
-		o.zmqClient = nil
+	if o.cmd == cmd {
+		o.running.Store(false)
+		if o.zmqClient != nil {
+			o.zmqClient.Close()
+			o.zmqClient = nil
+		}
 	}
 	o.mu.Unlock()
 
@@ -344,38 +367,22 @@ func (o *Output) runProcess(broadcaster *Broadcaster) {
 	}
 }
 
-func (o *Output) writeLoop() {
+func (o *Output) writeLoop(outID string, stdinPipe io.WriteCloser, dataCh <-chan []byte, stopCh <-chan struct{}) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("[output %s] PANIC RECOVERED in writeLoop: %v", o.config.ID, r)
+			log.Printf("[output %s] PANIC RECOVERED in writeLoop: %v", outID, r)
 		}
 	}()
-	defer func() {
-		if v := o.stdinRef.Load(); v != nil {
-			if wrapper, ok := v.(*stdinWrapper); ok && wrapper.pipe != nil {
-				wrapper.pipe.Close()
-			}
-		}
-		o.stdinRef.Store(&stdinWrapper{pipe: nil})
-	}()
+	defer stdinPipe.Close()
 
 	for {
 		select {
-		case data, ok := <-o.dataCh:
+		case data, ok := <-dataCh:
 			if !ok {
 				return
 			}
 
-			v := o.stdinRef.Load()
-			if v == nil {
-				continue
-			}
-			wrapper, ok := v.(*stdinWrapper)
-			if !ok || wrapper == nil || wrapper.pipe == nil {
-				continue
-			}
-
-			if _, err := wrapper.pipe.Write(data); err != nil {
+			if _, err := stdinPipe.Write(data); err != nil {
 				o.packetsDropped.Add(1)
 				continue
 			}
@@ -383,13 +390,13 @@ func (o *Output) writeLoop() {
 			o.bytesSent.Add(uint64(len(data)))
 			o.bitrateBytes.Add(uint64(len(data)))
 
-		case <-o.stopCh:
+		case <-stopCh:
 			return
 		}
 	}
 }
 
-func (o *Output) bitrateLoop() {
+func (o *Output) bitrateLoop(stopCh <-chan struct{}) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -403,26 +410,25 @@ func (o *Output) bitrateLoop() {
 			kbps := (bytes * 8) / 1000
 			o.currentBitrate.Store(kbps)
 
-		case <-o.stopCh:
+		case <-stopCh:
 			return
 		}
 	}
 }
 
 func (o *Output) Stop(broadcaster *Broadcaster) {
+	o.mu.Lock()
 	if !o.targetRunning.Load() {
+		o.mu.Unlock()
 		return
 	}
 
 	o.targetRunning.Store(false)
-
-	select {
-	case <-o.stopCh:
-	default:
+	if !o.stopClosed && o.stopCh != nil {
 		close(o.stopCh)
+		o.stopClosed = true
 	}
 
-	o.mu.Lock()
 	if o.cmd != nil && o.cmd.Process != nil {
 		_ = o.cmd.Process.Kill()
 	}
@@ -430,39 +436,50 @@ func (o *Output) Stop(broadcaster *Broadcaster) {
 		o.zmqClient.Close()
 		o.zmqClient = nil
 	}
+	id := o.config.ID
+	name := o.config.Name
 	o.mu.Unlock()
+
+	if broadcaster != nil {
+		broadcaster.Unsubscribe(id)
+	}
 
 	time.Sleep(100 * time.Millisecond)
 	o.running.Store(false)
-	log.Printf("[output:%s] Stopped", o.config.Name)
+	log.Printf("[output:%s] Stopped", name)
 	o.appendLog("--- Output stopped by user ---")
 }
 
 func (o *Output) GetStats() OutputStats {
+	o.mu.Lock()
+	cfg := o.config
+	startTime := o.startTime
+	o.mu.Unlock()
+
 	o.lastErrorMu.RLock()
 	lastErr := o.lastError
 	o.lastErrorMu.RUnlock()
 
 	uptimeStr := ""
-	if o.running.Load() && !o.startTime.IsZero() {
-		uptimeStr = time.Since(o.startTime).Truncate(time.Second).String()
+	if o.running.Load() && !startTime.IsZero() {
+		uptimeStr = time.Since(startTime).Truncate(time.Second).String()
 	}
 
 	return OutputStats{
-		ID:                o.config.ID,
-		Name:              o.config.Name,
+		ID:                cfg.ID,
+		Name:              cfg.Name,
 		Running:           o.targetRunning.Load(),
-		Codec:             string(o.config.Codec),
-		Bitrate:           o.config.Bitrate,
+		Codec:             string(cfg.Codec),
+		Bitrate:           cfg.Bitrate,
 		BytesSent:         o.bytesSent.Load(),
 		PacketsSent:       o.packetsSent.Load(),
 		PacketsDropped:    o.packetsDropped.Load(),
 		OutputBitrateKbps: float64(o.currentBitrate.Load()),
 		Uptime:            uptimeStr,
 		Error:             lastErr,
-		OverlayEnabled:    o.config.OverlayEnabled,
-		OverlayX:          o.config.OverlayX,
-		OverlayY:          o.config.OverlayY,
+		OverlayEnabled:    cfg.OverlayEnabled,
+		OverlayX:          cfg.OverlayX,
+		OverlayY:          cfg.OverlayY,
 	}
 }
 
@@ -523,44 +540,42 @@ func (om *OutputManager) AddOutput(config OutputConfig) error {
 
 func (om *OutputManager) RemoveOutput(id string) error {
 	om.mu.Lock()
-	defer om.mu.Unlock()
-
 	output, exists := om.outputs[id]
 	if !exists {
+		om.mu.Unlock()
 		return fmt.Errorf("output %s not found", id)
-	}
-
-	if output.targetRunning.Load() {
-		output.Stop(om.broadcaster)
 	}
 
 	delete(om.outputs, id)
 	om.saveConfig()
+	om.mu.Unlock()
+
+	if output.targetRunning.Load() {
+		output.Stop(om.broadcaster)
+	}
 	return nil
 }
 
 func (om *OutputManager) UpdateOutput(id string, config OutputConfig) error {
 	om.mu.Lock()
-	defer om.mu.Unlock()
-
-	output, exists := om.outputs[id]
+	oldOutput, exists := om.outputs[id]
 	if !exists {
+		om.mu.Unlock()
 		return fmt.Errorf("output %s not found", id)
 	}
 
-	wasRunning := output.targetRunning.Load()
-	if wasRunning {
-		output.Stop(om.broadcaster)
-	}
-
+	wasRunning := oldOutput.targetRunning.Load()
 	config.ID = id
-	om.outputs[id] = NewOutput(config, om.dataDir)
+	config.Running = wasRunning
+	newOutput := NewOutput(config, om.dataDir)
+	om.outputs[id] = newOutput
+	om.saveConfig()
+	om.mu.Unlock()
 
 	if wasRunning {
-		_ = om.outputs[id].Start(om.broadcaster)
+		oldOutput.Stop(om.broadcaster)
+		_ = newOutput.Start(om.broadcaster)
 	}
-
-	om.saveConfig()
 	return nil
 }
 
@@ -568,12 +583,15 @@ func (om *OutputManager) StartOutput(id string) error {
 	om.mu.Lock()
 	output, exists := om.outputs[id]
 	if exists {
+		output.mu.Lock()
 		url := output.config.URL
 		if !strings.HasPrefix(url, "rtmp://") && !strings.HasPrefix(url, "rtmps://") {
+			output.mu.Unlock()
 			om.mu.Unlock()
 			return fmt.Errorf("invalid RTMP URL: must start with rtmp:// or rtmps://")
 		}
 		output.config.Running = true
+		output.mu.Unlock()
 		om.saveConfig()
 	}
 	om.mu.Unlock()
@@ -589,7 +607,9 @@ func (om *OutputManager) StopOutput(id string) error {
 	om.mu.Lock()
 	output, exists := om.outputs[id]
 	if exists {
+		output.mu.Lock()
 		output.config.Running = false
+		output.mu.Unlock()
 		om.saveConfig()
 	}
 	om.mu.Unlock()
@@ -611,9 +631,6 @@ func (om *OutputManager) MoveOverlay(id string, x, y int) error {
 		return fmt.Errorf("output %s not found", id)
 	}
 
-	output.config.OverlayX = x
-	output.config.OverlayY = y
-
 	err := output.MoveOverlay(x, y)
 	om.saveConfig()
 	return err
@@ -625,7 +642,7 @@ func (om *OutputManager) GetOutputs() []OutputConfig {
 
 	configs := make([]OutputConfig, 0, len(om.outputs))
 	for _, o := range om.outputs {
-		configs = append(configs, o.config)
+		configs = append(configs, o.getConfig())
 	}
 	return configs
 }
@@ -655,27 +672,35 @@ func (om *OutputManager) GetLogs(id string) ([]string, error) {
 
 func (om *OutputManager) StopAll() {
 	om.mu.RLock()
-	defer om.mu.RUnlock()
-
+	toStop := make([]*Output, 0, len(om.outputs))
 	for _, o := range om.outputs {
 		if o.targetRunning.Load() {
-			o.Stop(om.broadcaster)
+			toStop = append(toStop, o)
 		}
+	}
+	om.mu.RUnlock()
+
+	for _, o := range toStop {
+		o.Stop(om.broadcaster)
 	}
 }
 
 func (om *OutputManager) RestartAll() {
 	om.mu.RLock()
-	defer om.mu.RUnlock()
-
+	toRestart := make([]*Output, 0, len(om.outputs))
 	for _, o := range om.outputs {
 		if o.targetRunning.Load() {
-			o.Stop(om.broadcaster)
-			time.Sleep(200 * time.Millisecond)
-			_ = o.Start(om.broadcaster)
+			toRestart = append(toRestart, o)
 		}
 	}
-	log.Printf("[outputs] All running outputs restarted")
+	om.mu.RUnlock()
+
+	for _, o := range toRestart {
+		o.Stop(om.broadcaster)
+		time.Sleep(200 * time.Millisecond)
+		_ = o.Start(om.broadcaster)
+	}
+	log.Printf("[outputs] All running outputs restarted (%d)", len(toRestart))
 }
 
 type savedConfig struct {
@@ -687,7 +712,7 @@ func (om *OutputManager) saveConfig() {
 		Outputs: make([]OutputConfig, 0, len(om.outputs)),
 	}
 	for _, o := range om.outputs {
-		cfg.Outputs = append(cfg.Outputs, o.config)
+		cfg.Outputs = append(cfg.Outputs, o.getConfig())
 	}
 
 	data, err := json.MarshalIndent(cfg, "", "  ")

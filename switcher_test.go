@@ -141,3 +141,61 @@ func TestSwitcher_BuildArgs(t *testing.T) {
 		t.Error("Did not find srt:// url in buildSRTArgs output")
 	}
 }
+
+func TestBroadcaster_MultiSubscriberSlowConsumer(t *testing.T) {
+	b := NewBroadcaster()
+	fastCh := b.Subscribe("fast")
+	slowCh := b.Subscribe("slow")
+	defer b.Unsubscribe("fast")
+	defer b.Unsubscribe("slow")
+
+	if b.SubscriberCount() != 2 {
+		t.Fatalf("Expected 2 subscribers, got %d", b.SubscriberCount())
+	}
+
+	receivedFast := 0
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range fastCh {
+			receivedFast++
+			if receivedFast == 650 {
+				return
+			}
+		}
+	}()
+
+	// Broadcast 650 batches without reading from slowCh (capacity 512):
+	// Broadcast must never block and fastCh must receive all 650 batches.
+	payload := make([]byte, tsPacketSize)
+	payload[0] = tsSyncByte
+	for i := 0; i < 650; i++ {
+		b.Broadcast(payload)
+	}
+
+	<-done
+	if receivedFast != 650 {
+		t.Errorf("Expected fast subscriber to receive 650 batches, got %d", receivedFast)
+	}
+	if len(slowCh) != 512 {
+		t.Errorf("Expected slow subscriber buffer to saturate at 512, got %d", len(slowCh))
+	}
+}
+
+func TestSwitcher_AudioLevelsTelemetry(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "switcher_audio_test.json")
+	switcher := NewSwitcher("127.0.0.1:1234", "caller", "/tmp/fallback.ts", 3000, "", tmpDir, configPath)
+
+	fbAudio := switcher.GetAudioLevels()
+	if fbAudio.Source != "fallback" || fbAudio.Active || fbAudio.BarLevel != 35 {
+		t.Errorf("Unexpected fallback AudioLevels: %+v", fbAudio)
+	}
+
+	switcher.setStateWithReason(StateLive, "live")
+	switcher.currentAudioKbps.Store(128)
+	liveAudio := switcher.GetAudioLevels()
+	if liveAudio.Source != "live" || !liveAudio.Active || liveAudio.BitrateKbps != 128 || liveAudio.BarLevel != 80 {
+		t.Errorf("Unexpected live AudioLevels: %+v", liveAudio)
+	}
+}
