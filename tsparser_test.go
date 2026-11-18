@@ -5,50 +5,60 @@ import (
 )
 
 func TestParseTSPacket(t *testing.T) {
-	// A valid TS packet starts with 0x47 (sync byte) and is 188 bytes long
-	pkt := make([]byte, 188)
-	pkt[0] = 0x47 // Sync byte
-
-	// Set PID = 256 (0x0100) in header bytes 1 & 2
-	pkt[1] = 0x01
-	pkt[2] = 0x00
+	pkt := make([]byte, tsPacketSize)
+	pkt[0] = tsSyncByte
+	pkt[1] = 0x41 // PUSI=1, PID high=0x01
+	pkt[2] = 0x00 // PID=256
+	pkt[3] = 0x15 // Payload only, CC=5
 
 	info, ok := ParseTSPacket(pkt)
 	if !ok {
 		t.Fatal("Failed to parse valid TS packet")
 	}
-
 	if info.PID != 256 {
 		t.Errorf("Expected PID 256, got %d", info.PID)
 	}
+	if !info.PUSI || !info.HasPayload || info.ContinuityCounter != 5 {
+		t.Errorf("Unexpected packet flags: %+v", info)
+	}
 }
 
-func TestPacketAligner(t *testing.T) {
-	// Aligner expects a stream of bytes and extracts valid 188-byte TS packets aligned to the sync byte 0x47
+func TestPacketAligner_NextAndBatch(t *testing.T) {
 	aligner := NewPacketAligner()
 
-	// Feed dirty data before sync byte
-	dirtyData := []byte{0x00, 0x11, 0x22, 0x33, 0x47} // Ends with sync byte
-	validPkt := make([]byte, 187)                     // rest of the 188 bytes
-	validPkt[0] = 0x01                                // Set PID high byte
-	validPkt[1] = 0x00                                // Set PID low byte
+	dirtyPrefix := []byte{0x00, 0x11, 0x22, 0x33}
+	pkt1 := make([]byte, tsPacketSize)
+	pkt1[0] = tsSyncByte
+	pkt1[1] = 0x01
+	pkt1[2] = 0x00
 
-	// Combine to feed to aligner
-	stream := append(dirtyData, validPkt...)
+	pkt2 := make([]byte, tsPacketSize)
+	pkt2[0] = tsSyncByte
+	pkt2[1] = 0x01
+	pkt2[2] = 0x01
 
-	packets := aligner.Feed(stream)
-	if len(packets) != 1 {
-		t.Fatalf("Expected 1 aligned packet, got %d", len(packets))
+	stream := append(dirtyPrefix, pkt1...)
+	stream = append(stream, pkt2...)
+	stream = append(stream, 0x47, 0x01) // trailing partial packet
+
+	aligner.Feed(stream)
+	batch := aligner.NextBatch()
+	if len(batch) != tsPacketSize*2 {
+		t.Fatalf("Expected batch of %d bytes, got %d", tsPacketSize*2, len(batch))
+	}
+	if batch[0] != tsSyncByte || batch[tsPacketSize] != tsSyncByte {
+		t.Errorf("Expected sync bytes at packet boundaries")
 	}
 
-	alignedPkt := packets[0]
-	if alignedPkt[0] != 0x47 {
-		t.Errorf("Expected sync byte 0x47, got 0x%02X", alignedPkt[0])
+	// Feed remaining 186 bytes to complete the 3rd packet
+	aligner.Feed(make([]byte, tsPacketSize-2))
+	single := aligner.Next()
+	if len(single) != tsPacketSize || single[0] != tsSyncByte {
+		t.Fatalf("Expected final 188-byte packet from trailing bytes")
 	}
 }
 
 func TestSwitcherStateMachine(t *testing.T) {
-	// A simple test for the state transitions
 	state := StateFallback
 	if state.String() != "fallback" {
 		t.Errorf("Expected StateFallback to stringify to 'fallback', got '%s'", state.String())

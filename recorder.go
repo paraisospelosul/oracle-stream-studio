@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -12,7 +13,7 @@ import (
 	"time"
 )
 
-// Recorder records the broadcaster stream to a .ts file, then remuxes to .mp4 on stop
+// Recorder records the broadcaster stream to a .ts file using buffered I/O, then remuxes to .mp4 on stop
 type Recorder struct {
 	broadcaster *Broadcaster
 	recordDir   string
@@ -25,6 +26,7 @@ type Recorder struct {
 	fileSize  atomic.Uint64
 	mu        sync.RWMutex
 	stopCh    chan struct{}
+	doneCh    chan struct{}
 }
 
 type RecordingStatus struct {
@@ -78,8 +80,12 @@ func (r *Recorder) Start() error {
 
 	f, err := os.Create(tsPath)
 	if err != nil {
+		r.recording.Store(false)
 		return fmt.Errorf("create file: %w", err)
 	}
+
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
 
 	r.mu.Lock()
 	r.tsPath = tsPath
@@ -87,40 +93,50 @@ func (r *Recorder) Start() error {
 	r.file = f
 	r.startTime = time.Now()
 	r.fileSize.Store(0)
-	r.stopCh = make(chan struct{})
+	r.stopCh = stopCh
+	r.doneCh = doneCh
 	r.mu.Unlock()
 
-	go r.recordLoop()
+	go r.recordLoop(f, stopCh, doneCh)
 
 	log.Printf("[recorder] Started recording to %s", tsPath)
 	return nil
 }
 
 func (r *Recorder) Stop() error {
-	if !r.recording.Load() {
+	if !r.recording.CompareAndSwap(true, false) {
 		return fmt.Errorf("not recording")
 	}
 
-	r.recording.Store(false)
-	select {
-	case <-r.stopCh:
-	default:
-		close(r.stopCh)
+	r.mu.RLock()
+	stopCh := r.stopCh
+	doneCh := r.doneCh
+	r.mu.RUnlock()
+
+	if stopCh != nil {
+		select {
+		case <-stopCh:
+		default:
+			close(stopCh)
+		}
 	}
 
-	// Wait for write loop to finish
-	time.Sleep(300 * time.Millisecond)
+	if doneCh != nil {
+		select {
+		case <-doneCh:
+		case <-time.After(1 * time.Second):
+		}
+	}
 
 	r.mu.Lock()
 	if r.file != nil {
-		r.file.Close()
+		_ = r.file.Close()
 		r.file = nil
 	}
 	tsPath := r.tsPath
 	mp4Path := r.mp4Path
 	r.mu.Unlock()
 
-	// Remux .ts to .mp4 in background
 	go func() {
 		log.Printf("[recorder] Remuxing %s -> %s", tsPath, mp4Path)
 		cmd := exec.Command("ffmpeg",
@@ -134,8 +150,7 @@ func (r *Recorder) Stop() error {
 			log.Printf("[recorder] Remux error: %v (keeping .ts)", err)
 			return
 		}
-		// Delete .ts after successful remux
-		os.Remove(tsPath)
+		_ = os.Remove(tsPath)
 		log.Printf("[recorder] Remux complete: %s", mp4Path)
 	}()
 
@@ -143,21 +158,35 @@ func (r *Recorder) Stop() error {
 	return nil
 }
 
-func (r *Recorder) recordLoop() {
+func (r *Recorder) recordLoop(f *os.File, stopCh, doneCh chan struct{}) {
+	defer close(doneCh)
 	defer func() {
 		if rec := recover(); rec != nil {
 			log.Printf("[recorder] PANIC RECOVERED in recordLoop: %v", rec)
 		}
 	}()
+
 	subID := "recorder_internal"
 	dataCh := r.broadcaster.Subscribe(subID)
 	defer r.broadcaster.Unsubscribe(subID)
 
+	bufWriter := bufio.NewWriterSize(f, 256*1024)
+	defer bufWriter.Flush()
+
+	flushTicker := time.NewTicker(20 * time.Millisecond)
+	defer flushTicker.Stop()
+
 	const (
-		maxSizeMB    = 10240            // 10 GB limit (Stage 6)
+		maxSizeMB    = 10240
 		maxSizeBytes = maxSizeMB * 1024 * 1024
-		maxDuration  = 12 * time.Hour   // 12 hours limit (Stage 6)
+		maxDuration  = 12 * time.Hour
 	)
+
+	r.mu.RLock()
+	startTime := r.startTime
+	r.mu.RUnlock()
+
+	dirty := false
 
 	for {
 		select {
@@ -165,32 +194,32 @@ func (r *Recorder) recordLoop() {
 			if !ok {
 				return
 			}
-			r.mu.RLock()
-			f := r.file
-			startTime := r.startTime
-			r.mu.RUnlock()
-
-			// Check limits (Stage 6)
 			if r.fileSize.Load() > maxSizeBytes {
 				log.Println("[recorder] Maximum file size limit reached (10GB), stopping recording...")
-				go r.Stop()
+				go func() { _ = r.Stop() }()
 				return
 			}
 			if !startTime.IsZero() && time.Since(startTime) > maxDuration {
 				log.Println("[recorder] Maximum duration limit reached (12h), stopping recording...")
-				go r.Stop()
+				go func() { _ = r.Stop() }()
 				return
 			}
 
-			if f != nil {
-				n, err := f.Write(data)
-				if err != nil {
-					log.Printf("[recorder] Write error: %v", err)
-					return
-				}
-				r.fileSize.Add(uint64(n))
+			n, err := bufWriter.Write(data)
+			if err != nil {
+				log.Printf("[recorder] Write error: %v", err)
+				return
 			}
-		case <-r.stopCh:
+			dirty = true
+			r.fileSize.Add(uint64(n))
+
+		case <-flushTicker.C:
+			if dirty {
+				_ = bufWriter.Flush()
+				dirty = false
+			}
+
+		case <-stopCh:
 			return
 		}
 	}
@@ -206,12 +235,11 @@ func (r *Recorder) ListRecordings() []RecordingEntry {
 		if e.IsDir() {
 			continue
 		}
-		// Skip temp .ts files if there's a matching .mp4
 		name := e.Name()
 		if filepath.Ext(name) == ".ts" {
 			mp4Name := name[:len(name)-3] + ".mp4"
 			if _, err := os.Stat(filepath.Join(r.recordDir, mp4Name)); err == nil {
-				continue // mp4 exists, skip ts
+				continue
 			}
 		}
 		info, err := e.Info()

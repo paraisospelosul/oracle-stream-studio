@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -33,12 +32,9 @@ type APIServer struct {
 	outputManager *OutputManager
 	sysStats      *SysStatsMonitor
 	preview       *PreviewManager
-	audioMeter    *AudioMeter
 	recorder      *Recorder
 	bboxManager   *BboxManager
 	sceneManager  *SceneManager
-	autoSwitch    *AutoSwitchEngine
-	scheduler     *Scheduler
 	dataDir       string
 	port          int
 	webUser       string
@@ -51,18 +47,29 @@ type APIServer struct {
 	clientsMu sync.Mutex
 }
 
-func NewAPIServer(switcher *Switcher, outputManager *OutputManager, sysStats *SysStatsMonitor, preview *PreviewManager, audioMeter *AudioMeter, recorder *Recorder, bboxManager *BboxManager, sceneManager *SceneManager, autoSwitch *AutoSwitchEngine, scheduler *Scheduler, dataDir string, port int, webUser string, webPass string, tlsCert string, tlsKey string) *APIServer {
+func NewAPIServer(
+	switcher *Switcher,
+	outputManager *OutputManager,
+	sysStats *SysStatsMonitor,
+	preview *PreviewManager,
+	recorder *Recorder,
+	bboxManager *BboxManager,
+	sceneManager *SceneManager,
+	dataDir string,
+	port int,
+	webUser string,
+	webPass string,
+	tlsCert string,
+	tlsKey string,
+) *APIServer {
 	return &APIServer{
 		switcher:      switcher,
 		outputManager: outputManager,
 		sysStats:      sysStats,
 		preview:       preview,
-		audioMeter:    audioMeter,
 		recorder:      recorder,
 		bboxManager:   bboxManager,
 		sceneManager:  sceneManager,
-		autoSwitch:    autoSwitch,
-		scheduler:     scheduler,
 		dataDir:       dataDir,
 		port:          port,
 		webUser:       webUser,
@@ -82,7 +89,7 @@ func NewAPIServer(switcher *Switcher, outputManager *OutputManager, sysStats *Sy
 				return false
 			},
 		},
-		clients:       make(map[*websocket.Conn]bool),
+		clients: make(map[*websocket.Conn]bool),
 	}
 }
 
@@ -102,13 +109,10 @@ func (s *APIServer) basicAuthMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// ─── CORS Middleware ───
-
 func (s *APIServer) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin != "" {
-			// Validate Origin (Allow same-host or localhost for dev)
 			host := r.Host
 			if strings.Contains(origin, host) || strings.Contains(origin, "localhost") || strings.Contains(origin, "127.0.0.1") {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
@@ -126,18 +130,16 @@ func (s *APIServer) corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// ─── Rate Limiter ───
-
 type rateLimiter struct {
-	mu       sync.Mutex
-	clients  map[string]*rateBucket
-	rate     int           // max requests per window
-	window   time.Duration
+	mu      sync.Mutex
+	clients map[string]*rateBucket
+	rate    int
+	window  time.Duration
 }
 
 type rateBucket struct {
-	count    int
-	resetAt  time.Time
+	count   int
+	resetAt time.Time
 }
 
 func newRateLimiter(rate int, window time.Duration) *rateLimiter {
@@ -146,7 +148,6 @@ func newRateLimiter(rate int, window time.Duration) *rateLimiter {
 		rate:    rate,
 		window:  window,
 	}
-	// Cleanup stale entries every 5 minutes
 	go func() {
 		for {
 			time.Sleep(5 * time.Minute)
@@ -181,13 +182,11 @@ func (rl *rateLimiter) allow(ip string) bool {
 
 func (s *APIServer) rateLimitMiddleware(rl *rateLimiter, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip rate limiting for static files and websocket
 		if !strings.HasPrefix(r.URL.Path, "/api/") {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Skip preview frames (polled frequently by design)
-		if r.URL.Path == "/api/preview/frame" {
+		if r.URL.Path == "/api/preview/frame" || strings.HasPrefix(r.URL.Path, "/api/scenes/thumb/") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -205,8 +204,6 @@ func (s *APIServer) rateLimitMiddleware(rl *rateLimiter, next http.Handler) http
 	})
 }
 
-// ─── Body Size Limit Middleware ───
-
 const maxBodySize = 10 << 20 // 10 MB default
 
 func bodySizeLimitMiddleware(next http.Handler) http.Handler {
@@ -219,7 +216,6 @@ func bodySizeLimitMiddleware(next http.Handler) http.Handler {
 			http.Error(w, `{"error":"request body too large"}`, http.StatusRequestEntityTooLarge)
 			return
 		}
-		// Also wrap the body reader to enforce the limit even if Content-Length is missing/lying
 		if r.Body != nil {
 			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}
@@ -227,22 +223,18 @@ func bodySizeLimitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// ─── Security Headers Middleware ───
-
 func securityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Content-Security-Policy", "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com https://cdn.jsdelivr.net; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;")
+		w.Header().Set("Content-Security-Policy", "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com https://cdn.jsdelivr.net; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;")
 		next.ServeHTTP(w, r)
 	})
 }
 
-// checkDiskSpace verifies if the volume containing path has at least minFreeBytes available space
 func checkDiskSpace(path string, minFreeBytes uint64) error {
 	var stat syscall.Statfs_t
-	err := syscall.Statfs(path, &stat)
-	if err != nil {
+	if err := syscall.Statfs(path, &stat); err != nil {
 		return err
 	}
 	freeBytes := uint64(stat.Bavail) * uint64(stat.Bsize)
@@ -253,11 +245,25 @@ func checkDiskSpace(path string, minFreeBytes uint64) error {
 }
 
 type StatusResponse struct {
-	System    SystemStats     `json:"system"`
-	Switcher  SwitcherStats   `json:"switcher"`
-	Outputs   []OutputStats   `json:"outputs"`
-	Audio     AudioLevels     `json:"audio"`
-	Recording RecordingStatus `json:"recording"`
+	System     SystemStats     `json:"system"`
+	Switcher   SwitcherStats   `json:"switcher"`
+	Outputs    []OutputStats   `json:"outputs"`
+	Audio      AudioLevels     `json:"audio"`
+	Recording  RecordingStatus `json:"recording"`
+	Preview    PreviewStatus   `json:"preview"`
+	BboxStatus string          `json:"bbox_status"`
+}
+
+func (s *APIServer) buildStatusResponse() StatusResponse {
+	return StatusResponse{
+		System:     s.sysStats.GetStats(),
+		Switcher:   s.switcher.GetStats(),
+		Outputs:    s.outputManager.GetStats(),
+		Audio:      s.switcher.GetAudioLevels(),
+		Recording:  s.recorder.GetStatus(),
+		Preview:    s.preview.GetStatus(),
+		BboxStatus: s.bboxManager.GetCachedStatus(),
+	}
 }
 
 func (s *APIServer) Run(ctx context.Context) error {
@@ -276,7 +282,16 @@ func (s *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/recording", s.handleRecording)
 	mux.HandleFunc("/api/recordings", s.handleRecordings)
 	mux.HandleFunc("/api/recordings/", s.handleRecordingAction)
-	
+
+	// Fallback & Scene Manager Routes
+	mux.HandleFunc("POST /api/fallback/mode", s.handleFallbackMode)
+	mux.HandleFunc("PUT /api/fallback/settings", s.handleFallbackSettings)
+	mux.HandleFunc("GET /api/scenes", s.handleGetScenes)
+	mux.HandleFunc("GET /api/scenes/thumb/", s.handleSceneThumb)
+	mux.HandleFunc("POST /api/scenes/activate", s.handleActivateScene)
+	mux.HandleFunc("POST /api/scenes/delete", s.handleDeleteScene)
+	mux.HandleFunc("POST /api/upload/scene", s.handleUploadScene)
+
 	// Bbox routes
 	mux.HandleFunc("/api/bbox/status", s.handleBboxStatus)
 	mux.HandleFunc("/api/bbox/action", s.handleBboxAction)
@@ -284,26 +299,8 @@ func (s *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/bbox/config", s.handleBboxConfig)
 	mux.HandleFunc("/api/bbox/compose", s.handleBboxCompose)
 
-	// Scene Manager Routes
-	mux.HandleFunc("GET /api/scenes", s.handleGetScenes)
-	mux.HandleFunc("POST /api/scenes/activate", s.handleActivateScene)
-	mux.HandleFunc("POST /api/scenes/delete", s.handleDeleteScene)
-	mux.HandleFunc("POST /api/upload/scene", s.handleUploadScene)
-
-	// Advanced Switching Routes (Stages 1-4)
-	mux.HandleFunc("GET /api/pipelines", s.handleGetPipelines)
-	mux.HandleFunc("GET /api/transitions/types", s.handleGetTransitionTypes)
-	mux.HandleFunc("/api/transitions/config", s.handleTransitionConfig)
-	mux.HandleFunc("/api/autoswitch/rules", s.handleAutoSwitchRules)
-	mux.HandleFunc("/api/autoswitch/rules/", s.handleAutoSwitchRuleAction)
-	mux.HandleFunc("GET /api/autoswitch/events", s.handleAutoSwitchEvents)
-	mux.HandleFunc("/api/schedule", s.handleSchedules)
-	mux.HandleFunc("/api/schedule/", s.handleScheduleAction)
-	mux.HandleFunc("GET /api/schedule/events", s.handleScheduleEvents)
-
 	// Health Check Route
 	mux.HandleFunc("GET /api/health", s.handleHealth)
-
 	mux.HandleFunc("/ws", s.handleWebSocket)
 
 	webContent, err := fs.Sub(webFS, "web")
@@ -318,10 +315,9 @@ func (s *APIServer) Run(ctx context.Context) error {
 		fileServer.ServeHTTP(w, r)
 	}))
 
-	go s.broadcastLoop()
+	go s.broadcastLoop(ctx)
 
-	// Build middleware chain: logging → bodyLimit → rateLimit → CORS → basicAuth → mux (Stage 5)
-	rl := newRateLimiter(60, 1*time.Second) // 60 API requests per second per IP
+	rl := newRateLimiter(60, 1*time.Second)
 	var handler http.Handler = mux
 	handler = s.basicAuthMiddleware(handler)
 	handler = s.corsMiddleware(handler)
@@ -359,30 +355,19 @@ func (s *APIServer) Run(ctx context.Context) error {
 		}()
 	}
 
-	log.Printf("[server] Security: CORS enabled, rate limit 60/s, body limit 10MB, logging active")
-
 	<-ctx.Done()
-	log.Println("[server] Shutting down HTTP server graciosamente...")
+	log.Println("[server] Shutting down HTTP server gracefully...")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
 }
 
-// ─── Status ───
+// ─── Status & Config ───
 
 func (s *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
-	resp := StatusResponse{
-		System:    s.sysStats.GetStats(),
-		Switcher:  s.switcher.GetStats(),
-		Outputs:   s.outputManager.GetStats(),
-		Audio:     s.audioMeter.GetLevels(),
-		Recording: s.recorder.GetStatus(),
-	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	json.NewEncoder(w).Encode(s.buildStatusResponse())
 }
-
-// ─── Config ───
 
 func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -401,6 +386,38 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// ─── Fallback Mode (BRB) & Settings ───
+
+func (s *APIServer) handleFallbackMode(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var req struct {
+		ManualFallback *bool `json:"manual_fallback"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ManualFallback == nil {
+		http.Error(w, `{"error":"provide manual_fallback boolean"}`, http.StatusBadRequest)
+		return
+	}
+	s.switcher.SetManualFallback(*req.ManualFallback)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":          "ok",
+		"manual_fallback": s.switcher.IsManualFallback(),
+	})
+}
+
+func (s *APIServer) handleFallbackSettings(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var req struct {
+		Resolution      string `json:"resolution"`
+		WaitForKeyframe bool   `json:"wait_for_keyframe"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+	s.switcher.UpdateFallbackSettings(req.Resolution, req.WaitForKeyframe)
+	json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
 }
 
 // ─── Outputs ───
@@ -518,7 +535,7 @@ func (s *APIServer) handleQuickAction(w http.ResponseWriter, r *http.Request) {
 	case "restart-fallback":
 		s.switcher.RestartFallback()
 		log.Printf("[AUDIT] Quick action executed: restart-fallback by client %s", r.RemoteAddr)
-		json.NewEncoder(w).Encode(map[string]string{"status": "Fallback restart requested"})
+		json.NewEncoder(w).Encode(map[string]string{"status": "RAM Slate reset to keyframe"})
 	case "restart-outputs":
 		s.outputManager.RestartAll()
 		log.Printf("[AUDIT] Quick action executed: restart-outputs by client %s", r.RemoteAddr)
@@ -529,20 +546,26 @@ func (s *APIServer) handleQuickAction(w http.ResponseWriter, r *http.Request) {
 		s.outputManager.RestartAll()
 		log.Printf("[AUDIT] Quick action executed: restart-all by client %s", r.RemoteAddr)
 		json.NewEncoder(w).Encode(map[string]string{"status": "Full restart requested"})
+	case "toggle-brb":
+		next := !s.switcher.IsManualFallback()
+		s.switcher.SetManualFallback(next)
+		msg := "Live retomada!"
+		if next {
+			msg = "Modo Pausa (BRB) ativado!"
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": msg, "manual_fallback": next})
 	default:
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"error": "unknown action"})
 	}
 }
 
-// ─── History ───
+// ─── History & Recording ───
 
 func (s *APIServer) handleHistory(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"events": s.switcher.GetSwitchHistory()})
 }
-
-// ─── Recording ───
 
 func (s *APIServer) handleRecording(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -584,7 +607,7 @@ func (s *APIServer) handleRecordings(w http.ResponseWriter, r *http.Request) {
 func (s *APIServer) handleRecordingAction(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	rawName := r.URL.Path[len("/api/recordings/"):]
-	name := filepath.Base(rawName) // Sanitize: prevent path traversal (../)
+	name := filepath.Base(rawName)
 	if name == "." || name == "/" || name == "" {
 		http.Error(w, "invalid filename", http.StatusBadRequest)
 		return
@@ -592,7 +615,6 @@ func (s *APIServer) handleRecordingAction(w http.ResponseWriter, r *http.Request
 
 	switch r.Method {
 	case http.MethodGet:
-		// Download file
 		filePath := filepath.Join(s.recorder.recordDir, name)
 		if _, err := os.Stat(filePath); os.IsNotExist(err) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -603,7 +625,6 @@ func (s *APIServer) handleRecordingAction(w http.ResponseWriter, r *http.Request
 		http.ServeFile(w, r, filePath)
 
 	case http.MethodDelete:
-		// Delete file
 		filePath := filepath.Join(s.recorder.recordDir, name)
 		if err := os.Remove(filePath); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -614,7 +635,6 @@ func (s *APIServer) handleRecordingAction(w http.ResponseWriter, r *http.Request
 		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
 
 	case http.MethodPut:
-		// Rename file
 		var body struct {
 			NewName string `json:"new_name"`
 		}
@@ -622,14 +642,15 @@ func (s *APIServer) handleRecordingAction(w http.ResponseWriter, r *http.Request
 			http.Error(w, "provide new_name", http.StatusBadRequest)
 			return
 		}
+		safeNew := filepath.Base(body.NewName)
 		oldPath := filepath.Join(s.recorder.recordDir, name)
-		newPath := filepath.Join(s.recorder.recordDir, body.NewName)
+		newPath := filepath.Join(s.recorder.recordDir, safeNew)
 		if err := os.Rename(oldPath, newPath); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
-		log.Printf("[AUDIT] Recording file renamed: old=%s new=%s by client %s", name, body.NewName, r.RemoteAddr)
+		log.Printf("[AUDIT] Recording file renamed: old=%s new=%s by client %s", name, safeNew, r.RemoteAddr)
 		json.NewEncoder(w).Encode(map[string]string{"status": "renamed"})
 
 	default:
@@ -637,7 +658,7 @@ func (s *APIServer) handleRecordingAction(w http.ResponseWriter, r *http.Request
 	}
 }
 
-// ─── WebSocket ───
+// ─── WebSocket & Auto-Off Preview ───
 
 type WSMessage struct {
 	Type     string `json:"type"`
@@ -654,8 +675,8 @@ func (s *APIServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.clientsMu.Lock()
 	s.clients[conn] = true
 	s.clientsMu.Unlock()
-	
-	conn.SetReadLimit(4096) // Limit WebSocket message size to 4KB to prevent DoS memory exhaustion
+
+	conn.SetReadLimit(4096)
 
 	go func() {
 		defer func() {
@@ -664,17 +685,16 @@ func (s *APIServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			s.clientsMu.Unlock()
 			conn.Close()
 		}()
-		
+
 		msgCount := 0
 		lastCheck := time.Now()
-		
+
 		for {
 			_, msgBytes, err := conn.ReadMessage()
 			if err != nil {
 				return
 			}
-			
-			// Rate limit incoming messages (max 30 messages/sec) to prevent overlay drag spam DoS
+
 			now := time.Now()
 			if now.Sub(lastCheck) >= 1*time.Second {
 				msgCount = 0
@@ -682,9 +702,9 @@ func (s *APIServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			msgCount++
 			if msgCount > 30 {
-				time.Sleep(50 * time.Millisecond) // Throttle the connection
+				time.Sleep(50 * time.Millisecond)
 			}
-			
+
 			var msg WSMessage
 			if err := json.Unmarshal(msgBytes, &msg); err != nil {
 				continue
@@ -698,137 +718,92 @@ func (s *APIServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-func (s *APIServer) broadcastLoop() {
+func (s *APIServer) broadcastLoop(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		// Snapshot client list under lock
-		s.clientsMu.Lock()
-		if len(s.clients) == 0 {
-			s.clientsMu.Unlock()
-			continue
-		}
-		conns := make([]*websocket.Conn, 0, len(s.clients))
-		for conn := range s.clients {
-			conns = append(conns, conn)
-		}
-		s.clientsMu.Unlock()
 
-		// Build status data outside the lock
-		resp := StatusResponse{
-			System:    s.sysStats.GetStats(),
-			Switcher:  s.switcher.GetStats(),
-			Outputs:   s.outputManager.GetStats(),
-			Audio:     s.audioMeter.GetLevels(),
-			Recording: s.recorder.GetStatus(),
-		}
-		data, err := json.Marshal(resp)
-		if err != nil {
-			continue
-		}
+	idleWithoutClientsSecs := 0
 
-		// Write to each client without holding the lock
-		var failed []*websocket.Conn
-		for _, conn := range conns {
-			conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
-			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-				failed = append(failed, conn)
-			}
-		}
-
-		// Remove failed clients
-		if len(failed) > 0 {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 			s.clientsMu.Lock()
-			for _, conn := range failed {
-				conn.Close()
-				delete(s.clients, conn)
+			clientCount := len(s.clients)
+			if clientCount == 0 {
+				s.clientsMu.Unlock()
+				if s.preview.IsRunning() {
+					idleWithoutClientsSecs++
+					if idleWithoutClientsSecs >= 30 {
+						s.preview.DisableAuto()
+						idleWithoutClientsSecs = 0
+					}
+				} else {
+					idleWithoutClientsSecs = 0
+				}
+				continue
+			}
+			idleWithoutClientsSecs = 0
+			conns := make([]*websocket.Conn, 0, clientCount)
+			for conn := range s.clients {
+				conns = append(conns, conn)
 			}
 			s.clientsMu.Unlock()
+
+			resp := s.buildStatusResponse()
+			data, err := json.Marshal(resp)
+			if err != nil {
+				continue
+			}
+
+			var failed []*websocket.Conn
+			for _, conn := range conns {
+				conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+				if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+					failed = append(failed, conn)
+				}
+			}
+
+			if len(failed) > 0 {
+				s.clientsMu.Lock()
+				for _, conn := range failed {
+					conn.Close()
+					delete(s.clients, conn)
+				}
+				s.clientsMu.Unlock()
+			}
 		}
 	}
 }
 
-// ─── Uploads ───
+// ─── Uploads & Scenes ───
+
+func isAllowedSceneExt(ext string) bool {
+	switch ext {
+	case ".jpg", ".jpeg", ".png", ".webp", ".ts", ".mp4":
+		return true
+	default:
+		return false
+	}
+}
 
 func (s *APIServer) handleUploadFallback(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if err := checkDiskSpace(s.dataDir, 500*1024*1024); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInsufficientStorage)
-		w.Write([]byte(fmt.Sprintf(`{"error":"%v"}`, err)))
-		return
-	}
-	r.ParseMultipartForm(50 << 20)
-	file, handler, err := r.FormFile("file")
-	if err != nil {
-		http.Error(w, "Error retrieving file", http.StatusBadRequest)
-		return
-	}
-	defer file.Close()
-	ext := strings.ToLower(filepath.Ext(handler.Filename))
-	if ext != ".jpg" && ext != ".jpeg" && ext != ".png" && ext != ".ts" && ext != ".mp4" {
-		http.Error(w, "Invalid file type", http.StatusBadRequest)
-		return
-	}
-	destPath := filepath.Join(s.dataDir, "fallback"+ext)
-	dest, err := os.Create(destPath)
-	if err != nil {
-		http.Error(w, "Error creating file", http.StatusInternalServerError)
-		return
-	}
-	defer dest.Close()
-	io.Copy(dest, file)
-
-	// For images: pre-render to .ts in background to avoid continuous libx265 encoding
-	if ext == ".jpg" || ext == ".jpeg" || ext == ".png" {
-		prerenderedPath := filepath.Join(s.dataDir, "fallback_prerendered.ts")
-		go func() {
-			log.Printf("[server] Pre-rendering image fallback: %s → %s", destPath, prerenderedPath)
-			cmd := exec.Command("ffmpeg",
-				"-hide_banner", "-loglevel", "error", "-y",
-				"-loop", "1", "-framerate", "30",
-				"-i", destPath,
-				"-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
-				"-c:v", "libx265", "-preset", "ultrafast",
-				"-x265-params", "keyint=60:min-keyint=60",
-				"-pix_fmt", "yuv420p",
-				"-c:a", "aac", "-b:a", "128k",
-				"-t", "10", // 10-second loop file
-				"-f", "mpegts", prerenderedPath,
-			)
-			if err := cmd.Run(); err != nil {
-				log.Printf("[server] Pre-render failed: %v (using original image)", err)
-				s.switcher.UpdateFallbackPath(destPath)
-			} else {
-				log.Printf("[server] Pre-render complete: %s", prerenderedPath)
-				s.switcher.UpdateFallbackPath(prerenderedPath)
-			}
-			s.switcher.RestartFallback()
-		}()
-	} else {
-		s.switcher.UpdateFallbackPath(destPath)
-		s.switcher.RestartFallback()
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"success":true}`))
+	s.handleUploadScene(w, r)
 }
 
 func (s *APIServer) handleUploadWatermark(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
+	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := checkDiskSpace(s.dataDir, 500*1024*1024); err != nil {
+	if err := checkDiskSpace(s.dataDir, 200*1024*1024); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInsufficientStorage)
-		w.Write([]byte(fmt.Sprintf(`{"error":"%v"}`, err)))
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	r.ParseMultipartForm(10 << 20)
+	_ = r.ParseMultipartForm(10 << 20)
 	file, handler, err := r.FormFile("file")
 	if err != nil {
 		http.Error(w, "Error retrieving file", http.StatusBadRequest)
@@ -846,9 +821,151 @@ func (s *APIServer) handleUploadWatermark(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer dest.Close()
-	io.Copy(dest, file)
+	_, _ = io.Copy(dest, file)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"success":true}`))
+}
+
+func (s *APIServer) handleGetScenes(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	cfg := s.switcher.GetConfig()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"scenes":            s.sceneManager.GetScenes(),
+		"active_id":         s.sceneManager.GetActiveID(),
+		"resolution":        cfg.FallbackResolution,
+		"wait_for_keyframe": cfg.WaitForKeyframe,
+		"manual_fallback":   s.switcher.IsManualFallback(),
+	})
+}
+
+func (s *APIServer) handleSceneThumb(w http.ResponseWriter, r *http.Request) {
+	id := filepath.Base(r.URL.Path[len("/api/scenes/thumb/"):])
+	sc, ok := s.sceneManager.GetSceneByID(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	if sc.ThumbPath != "" {
+		if _, err := os.Stat(sc.ThumbPath); err == nil {
+			w.Header().Set("Cache-Control", "no-cache")
+			http.ServeFile(w, r, sc.ThumbPath)
+			return
+		}
+	}
+	if sc.OrigPath != "" && isImageExtension(filepath.Ext(sc.OrigPath)) {
+		if _, err := os.Stat(sc.OrigPath); err == nil {
+			w.Header().Set("Cache-Control", "no-cache")
+			http.ServeFile(w, r, sc.OrigPath)
+			return
+		}
+	}
+	http.NotFound(w, r)
+}
+
+func (s *APIServer) handleActivateScene(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
+		return
+	}
+	if err := s.sceneManager.ActivateScene(req.ID); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	log.Printf("[AUDIT] Scene activated in RAM: id=%s by client %s", req.ID, r.RemoteAddr)
+	json.NewEncoder(w).Encode(map[string]string{"status": "success", "active_id": req.ID})
+}
+
+func (s *APIServer) handleDeleteScene(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
+		return
+	}
+	if err := s.sceneManager.RemoveScene(req.ID); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	log.Printf("[AUDIT] Scene deleted: id=%s by client %s", req.ID, r.RemoteAddr)
+	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+}
+
+func (s *APIServer) handleUploadScene(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if err := checkDiskSpace(s.dataDir, 250*1024*1024); err != nil {
+		w.WriteHeader(http.StatusInsufficientStorage)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	_ = r.ParseMultipartForm(50 << 20)
+	file, handler, err := r.FormFile("file")
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Error retrieving file"})
+		return
+	}
+	defer file.Close()
+
+	ext := strings.ToLower(filepath.Ext(handler.Filename))
+	if !isAllowedSceneExt(ext) {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Formato inválido: envie .jpg, .png, .webp, .mp4 ou .ts"})
+		return
+	}
+
+	sceneName := strings.TrimSpace(r.FormValue("name"))
+	if sceneName == "" {
+		sceneName = strings.TrimSuffix(filepath.Base(handler.Filename), ext)
+	}
+	activateNow := r.FormValue("activate") != "false"
+
+	scenesDir := filepath.Join(s.dataDir, "scenes")
+	os.MkdirAll(scenesDir, 0755)
+
+	stamp := fmt.Sprintf("%d", time.Now().UnixMilli())
+	destPath := filepath.Join(scenesDir, fmt.Sprintf("orig_%s%s", stamp, ext))
+
+	dest, err := os.Create(destPath)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to save uploaded file"})
+		return
+	}
+	_, copyErr := io.Copy(dest, file)
+	dest.Close()
+	if copyErr != nil {
+		_ = os.Remove(destPath)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to write file"})
+		return
+	}
+
+	scene, err := s.sceneManager.AddAndCompileScene(sceneName, destPath, activateNow)
+	if err != nil {
+		_ = os.Remove(destPath)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "success",
+		"scene":     scene,
+		"active_id": s.sceneManager.GetActiveID(),
+	})
 }
 
 // ─── Preview ───
@@ -858,35 +975,25 @@ func (s *APIServer) handlePreviewFrame(w http.ResponseWriter, r *http.Request) {
 	if frame == nil {
 		w.Header().Set("Content-Type", "image/jpeg")
 		w.Header().Set("Cache-Control", "no-cache")
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "no-cache, no-store")
-	w.Write(frame)
+	_, _ = w.Write(frame)
 }
 
 func (s *APIServer) handlePreviewSettings(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	switch r.Method {
 	case http.MethodGet:
-		fps, width, height := s.preview.GetSettings()
-		json.NewEncoder(w).Encode(map[string]int{"fps": fps, "width": width, "height": height})
+		json.NewEncoder(w).Encode(s.preview.GetStatus())
 	case http.MethodPut:
 		fps, _ := strconv.Atoi(r.URL.Query().Get("fps"))
 		width, _ := strconv.Atoi(r.URL.Query().Get("w"))
 		height, _ := strconv.Atoi(r.URL.Query().Get("h"))
-		if fps < 0 {
-			fps = 0
-		}
-		if width <= 0 {
-			width = 640
-		}
-		if height <= 0 {
-			height = 360
-		}
 		s.preview.UpdateSettings(fps, width, height)
-		json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
+		json.NewEncoder(w).Encode(s.preview.GetStatus())
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -895,13 +1002,8 @@ func (s *APIServer) handlePreviewSettings(w http.ResponseWriter, r *http.Request
 // ─── Bbox ───
 
 func (s *APIServer) handleBboxStatus(w http.ResponseWriter, r *http.Request) {
-	status, err := s.bboxManager.GetStatus()
 	w.Header().Set("Content-Type", "application/json")
-	if err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": err.Error()})
-		return
-	}
-	json.NewEncoder(w).Encode(map[string]string{"status": status})
+	json.NewEncoder(w).Encode(map[string]string{"status": s.bboxManager.GetCachedStatus()})
 }
 
 func (s *APIServer) handleBboxAction(w http.ResponseWriter, r *http.Request) {
@@ -918,11 +1020,13 @@ func (s *APIServer) handleBboxAction(w http.ResponseWriter, r *http.Request) {
 		err = s.bboxManager.Stop()
 	case "restart":
 		err = s.bboxManager.Restart()
+	case "update":
+		err = s.bboxManager.Update()
 	default:
 		http.Error(w, "Invalid action", http.StatusBadRequest)
 		return
 	}
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -930,7 +1034,7 @@ func (s *APIServer) handleBboxAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[AUDIT] Bbox Docker Action executed: action=%s by client %s", action, r.RemoteAddr)
-	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+	json.NewEncoder(w).Encode(map[string]string{"status": "success", "bbox_status": s.bboxManager.GetCachedStatus()})
 }
 
 func (s *APIServer) handleBboxLogs(w http.ResponseWriter, r *http.Request) {
@@ -946,14 +1050,15 @@ func (s *APIServer) handleBboxLogs(w http.ResponseWriter, r *http.Request) {
 
 func (s *APIServer) handleBboxConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	if r.Method == http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
 		config, err := s.bboxManager.ReadConfig()
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]string{"content": "{}"})
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]string{"content": config})
-	} else if r.Method == http.MethodPut {
+	case http.MethodPut:
 		var req struct {
 			Content string `json:"content"`
 		}
@@ -961,7 +1066,6 @@ func (s *APIServer) handleBboxConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
-		// Validate JSON before saving
 		if !json.Valid([]byte(req.Content)) {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON content"})
@@ -973,21 +1077,22 @@ func (s *APIServer) handleBboxConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]string{"status": "success"})
-	} else {
+	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 func (s *APIServer) handleBboxCompose(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	if r.Method == http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
 		config, err := s.bboxManager.ReadCompose()
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]string{"content": ""})
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]string{"content": config})
-	} else if r.Method == http.MethodPut {
+	case http.MethodPut:
 		var req struct {
 			Content string `json:"content"`
 		}
@@ -995,14 +1100,8 @@ func (s *APIServer) handleBboxCompose(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
-		// Basic YAML validation (no yaml library needed)
 		trimmed := strings.TrimSpace(req.Content)
-		if len(trimmed) < 10 {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "compose content too short or empty"})
-			return
-		}
-		if !strings.Contains(trimmed, "services") {
+		if len(trimmed) < 10 || !strings.Contains(trimmed, "services") {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": "invalid compose file: missing 'services' section"})
 			return
@@ -1013,372 +1112,10 @@ func (s *APIServer) handleBboxCompose(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]string{"status": "success"})
-	} else {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-// ─── Scene Manager Handlers (Stage 4) ───
-
-func (s *APIServer) handleGetScenes(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	scenes := s.sceneManager.GetScenes()
-	activeID := s.sceneManager.GetActiveID()
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"scenes":    scenes,
-		"active_id": activeID,
-	})
-}
-
-func (s *APIServer) handleActivateScene(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	var req struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
-		return
-	}
-	if err := s.sceneManager.ActivateScene(req.ID); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-	log.Printf("[AUDIT] Scene activated: id=%s by client %s", req.ID, r.RemoteAddr)
-	json.NewEncoder(w).Encode(map[string]string{"status": "success", "active_id": req.ID})
-}
-
-func (s *APIServer) handleDeleteScene(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	var req struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
-		return
-	}
-	if req.ID == "default" {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Cannot delete default scene"})
-		return
-	}
-
-	var filePath string
-	for _, sc := range s.sceneManager.GetScenes() {
-		if sc.ID == req.ID {
-			filePath = sc.FilePath
-			break
-		}
-	}
-
-	if err := s.sceneManager.RemoveScene(req.ID); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-
-	if filePath != "" {
-		// Clean up files on disk
-		os.Remove(filePath)
-		if strings.HasSuffix(filePath, "_prerendered.ts") {
-			orig := strings.TrimSuffix(filePath, "_prerendered.ts")
-			os.Remove(orig + ".jpg")
-			os.Remove(orig + ".jpeg")
-			os.Remove(orig + ".png")
-		}
-	}
-
-	log.Printf("[AUDIT] Scene deleted: id=%s by client %s", req.ID, r.RemoteAddr)
-	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
-}
-
-func (s *APIServer) handleUploadScene(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	
-	if err := checkDiskSpace(s.dataDir, 500*1024*1024); err != nil {
-		w.WriteHeader(http.StatusInsufficientStorage)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-	
-	r.ParseMultipartForm(50 << 20) // 50MB max upload
-	file, handler, err := r.FormFile("file")
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Error retrieving file"})
-		return
-	}
-	defer file.Close()
-
-	ext := strings.ToLower(filepath.Ext(handler.Filename))
-	if ext != ".jpg" && ext != ".jpeg" && ext != ".png" && ext != ".ts" && ext != ".mp4" {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid file type: only jpg, png, mp4, ts supported"})
-		return
-	}
-
-	sceneName := r.FormValue("name")
-	if sceneName == "" {
-		sceneName = strings.TrimSuffix(handler.Filename, ext)
-	}
-
-	// Ensure scenes subdirectory exists
-	scenesDir := filepath.Join(s.dataDir, "scenes")
-	os.MkdirAll(scenesDir, 0755)
-
-	stamp := fmt.Sprintf("%d", time.Now().UnixMilli())
-	safeFilename := fmt.Sprintf("scene_%s%s", stamp, ext)
-	destPath := filepath.Join(scenesDir, safeFilename)
-
-	dest, err := os.Create(destPath)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create target file"})
-		return
-	}
-	defer dest.Close()
-	io.Copy(dest, file)
-
-	// In case of image: pre-render to .ts in background (Stage 4)
-	if ext == ".jpg" || ext == ".jpeg" || ext == ".png" {
-		prerenderedPath := filepath.Join(scenesDir, fmt.Sprintf("scene_%s_prerendered.ts", stamp))
-		
-		// Instantly register scene pointing to original image, then update to .ts when finished
-		scene, _ := s.sceneManager.AddScene(sceneName, destPath)
-		
-		go func() {
-			log.Printf("[scenes] Pre-rendering image scene: %s → %s", destPath, prerenderedPath)
-			cmd := exec.Command("ffmpeg",
-				"-hide_banner", "-loglevel", "error", "-y",
-				"-loop", "1", "-framerate", "30",
-				"-i", destPath,
-				"-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
-				"-c:v", "libx265", "-preset", "ultrafast",
-				"-x265-params", "keyint=60:min-keyint=60",
-				"-pix_fmt", "yuv420p",
-				"-c:a", "aac", "-b:a", "128k",
-				"-t", "10",
-				"-f", "mpegts", prerenderedPath,
-			)
-			if err := cmd.Run(); err != nil {
-				log.Printf("[scenes] Pre-rendering scene image failed: %v", err)
-			} else {
-				log.Printf("[scenes] Pre-rendering scene image complete: %s", prerenderedPath)
-				
-				s.sceneManager.mu.Lock()
-				for i, sc := range s.sceneManager.scenes {
-					if sc.ID == scene.ID {
-						s.sceneManager.scenes[i].FilePath = prerenderedPath
-						break
-					}
-				}
-				s.sceneManager.saveConfig()
-				s.sceneManager.mu.Unlock()
-				
-				// Restart fallback if this is the active scene
-				if s.sceneManager.GetActiveID() == scene.ID {
-					s.switcher.UpdateFallbackPath(prerenderedPath)
-					s.switcher.RestartFallback()
-				}
-			}
-		}()
-		json.NewEncoder(w).Encode(map[string]interface{}{"status": "success", "scene": scene})
-	} else {
-		// Video scene
-		scene, err := s.sceneManager.AddScene(sceneName, destPath)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]interface{}{"status": "success", "scene": scene})
-	}
-}
-
-// ─── Advanced Switching Handlers (Stages 1-4) ───
-
-func (s *APIServer) handleGetPipelines(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"pipelines": s.switcher.router.GetPipelineStats(),
-	})
-}
-
-func (s *APIServer) handleGetTransitionTypes(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"transitions": GetAvailableTransitions(),
-	})
-}
-
-func (s *APIServer) handleTransitionConfig(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	switch r.Method {
-	case http.MethodGet:
-		json.NewEncoder(w).Encode(s.switcher.transition.GetConfig())
-	case http.MethodPut:
-		var cfg TransitionConfig
-		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-			http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
-			return
-		}
-		s.switcher.transition.SetConfig(cfg)
-		json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
-
-func (s *APIServer) handleAutoSwitchRules(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	switch r.Method {
-	case http.MethodGet:
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"rules": s.autoSwitch.GetRules(),
-		})
-	case http.MethodPost:
-		var rule SwitchRule
-		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
-			http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
-			return
-		}
-		s.autoSwitch.AddRule(rule)
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]string{"status": "created", "id": rule.ID})
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *APIServer) handleAutoSwitchRuleAction(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	id := r.URL.Path[len("/api/autoswitch/rules/"):]
-
-	switch r.Method {
-	case http.MethodPut:
-		var rule SwitchRule
-		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
-			http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
-			return
-		}
-		if err := s.autoSwitch.UpdateRule(id, rule); err != nil {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
-	case http.MethodDelete:
-		if err := s.autoSwitch.RemoveRule(id); err != nil {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
-	case http.MethodPost:
-		// Toggle enable/disable
-		var body struct {
-			Enabled bool `json:"enabled"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
-			return
-		}
-		if err := s.autoSwitch.ToggleRule(id, body.Enabled); err != nil {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "toggled"})
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *APIServer) handleAutoSwitchEvents(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"events": s.autoSwitch.GetEvents(),
-	})
-}
-
-func (s *APIServer) handleSchedules(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	switch r.Method {
-	case http.MethodGet:
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"schedules": s.scheduler.GetSchedules(),
-		})
-	case http.MethodPost:
-		var sched ScheduledSwitch
-		if err := json.NewDecoder(r.Body).Decode(&sched); err != nil {
-			http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
-			return
-		}
-		s.scheduler.AddSchedule(sched)
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]string{"status": "created", "id": sched.ID})
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *APIServer) handleScheduleAction(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	id := r.URL.Path[len("/api/schedule/"):]
-	if id == "events" {
-		// Handled by separate route
-		return
-	}
-
-	switch r.Method {
-	case http.MethodPut:
-		var sched ScheduledSwitch
-		if err := json.NewDecoder(r.Body).Decode(&sched); err != nil {
-			http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
-			return
-		}
-		if err := s.scheduler.UpdateSchedule(id, sched); err != nil {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
-	case http.MethodDelete:
-		if err := s.scheduler.RemoveSchedule(id); err != nil {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
-	case http.MethodPost:
-		var body struct {
-			Enabled bool `json:"enabled"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
-			return
-		}
-		if err := s.scheduler.ToggleSchedule(id, body.Enabled); err != nil {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "toggled"})
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *APIServer) handleScheduleEvents(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"events": s.scheduler.GetEvents(),
-	})
-}
-
-// ─── Health Check Handler ───
 
 func (s *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -1386,18 +1123,19 @@ func (s *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":    "healthy",
 		"uptime":    time.Since(serverStartTime).Truncate(time.Second).String(),
 		"timestamp": time.Now().Unix(),
-		"version":   "4.0",
+		"version":   "2.0-ultralight",
 	})
 }
-
-// ─── Logging Middleware (Stage 5) ───
 
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(lrw, r)
-		log.Printf("[http] %s %s from %s - Status %d - Took %s", r.Method, r.URL.Path, r.RemoteAddr, lrw.statusCode, time.Since(start).Truncate(time.Microsecond))
+		// Avoid spamming journald with high-frequency preview frame reads
+		if r.URL.Path != "/api/preview/frame" {
+			log.Printf("[http] %s %s from %s - Status %d - Took %s", r.Method, r.URL.Path, r.RemoteAddr, lrw.statusCode, time.Since(start).Truncate(time.Microsecond))
+		}
 	})
 }
 

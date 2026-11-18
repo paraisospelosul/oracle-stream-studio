@@ -32,13 +32,13 @@ type OutputConfig struct {
 	URL            string      `json:"url"`
 	StreamKey      string      `json:"stream_key"`
 	Codec          OutputCodec `json:"codec"`
-	Bitrate        int         `json:"bitrate"`   // kbps, only for h264
-	Preset         string      `json:"preset"`    // FFmpeg preset, only for h264
+	Bitrate        int         `json:"bitrate"` // kbps, only for h264
+	Preset         string      `json:"preset"`  // FFmpeg preset, only for h264
 	Enabled        bool        `json:"enabled"`
 	OverlayEnabled bool        `json:"overlay_enabled"`
 	OverlayX       int         `json:"overlay_x"`
 	OverlayY       int         `json:"overlay_y"`
-	Running        bool        `json:"running"` // Persist running state on boot (Stage 6)
+	Running        bool        `json:"running"`
 }
 
 // OutputStats holds runtime statistics for an output
@@ -59,21 +59,20 @@ type OutputStats struct {
 	OverlayY          int     `json:"overlay_y"`
 }
 
-// stdinWrapper wraps io.WriteCloser to allow atomic storing of nil values without panicking
 type stdinWrapper struct {
 	pipe io.WriteCloser
 }
 
 // Output represents a single RTMP output destination
 type Output struct {
-	config    OutputConfig
-	cmd       *exec.Cmd
-	stdinRef  atomic.Value // stores *stdinWrapper — lock-free access in writeLoop
+	config        OutputConfig
+	cmd           *exec.Cmd
+	stdinRef      atomic.Value // stores *stdinWrapper — lock-free access in writeLoop
 	targetRunning atomic.Bool
-	running   atomic.Bool
-	dataCh    chan []byte
-	stopCh    chan struct{}
-	mu        sync.Mutex
+	running       atomic.Bool
+	dataCh        chan []byte
+	stopCh        chan struct{}
+	mu            sync.Mutex
 
 	// ZMQ Controls
 	zmqPort   int
@@ -99,7 +98,7 @@ func NewOutput(config OutputConfig, dataDir string) *Output {
 	return &Output{
 		config:    config,
 		dataDir:   dataDir,
-		dataCh:    make(chan []byte, 5000),
+		dataCh:    make(chan []byte, 512),
 		stopCh:    make(chan struct{}),
 		logBuffer: make([]string, 0, 50),
 	}
@@ -135,23 +134,24 @@ func findFreePort() (int, error) {
 func (o *Output) buildFFmpegArgs() []string {
 	rtmpURL := o.config.URL
 	if o.config.StreamKey != "" {
-		rtmpURL = rtmpURL + "/" + o.config.StreamKey
+		rtmpURL = strings.TrimRight(rtmpURL, "/") + "/" + o.config.StreamKey
 	}
 
+	// Clean MPEG-TS input: PTSRemapper already guarantees monotonic PTS/DTS/PCR and continuous CC,
+	// so we avoid -use_wallclock_as_timestamps (which breaks iPhone B-frame presentation order).
 	args := []string{
 		"-hide_banner", "-loglevel", "warning",
-		"-use_wallclock_as_timestamps", "1",
-		"-fflags", "+genpts+discardcorrupt+igndts",
+		"-fflags", "+discardcorrupt",
 		"-f", "mpegts",
 		"-i", "pipe:0",
 	}
 
 	switch o.config.Codec {
 	case CodecH265Passthrough:
-		// Remux video, transcode audio to standard AAC for RTMP
+		// Zero-CPU video + audio passthrough (Moblin & RAM Slate both emit AAC 48kHz stereo)
 		args = append(args,
 			"-c:v", "copy",
-			"-c:a", "aac", "-b:a", "128k", "-ar", "48000",
+			"-c:a", "copy",
 		)
 	case CodecH264Transcode:
 		preset := o.config.Preset
@@ -166,17 +166,18 @@ func (o *Output) buildFFmpegArgs() []string {
 			"-c:v", "libx264",
 			"-preset", preset,
 			"-tune", "zerolatency",
+			"-threads", "2",
 			"-b:v", fmt.Sprintf("%dk", bitrate),
 			"-maxrate", fmt.Sprintf("%dk", bitrate),
 			"-bufsize", fmt.Sprintf("%dk", bitrate*2),
-			"-g", "60", // 2 second GOP at 30fps
+			"-g", "60",
 		)
 
 		if o.config.OverlayEnabled {
 			if o.zmqPort == 0 {
 				port, err := findFreePort()
 				if err != nil {
-					o.zmqPort = 5560 // Fallback
+					o.zmqPort = 5560
 				} else {
 					o.zmqPort = port
 				}
@@ -194,11 +195,8 @@ func (o *Output) buildFFmpegArgs() []string {
 
 			var filterStr string
 			if _, err := os.Stat(watermarkPath); err == nil {
-				// Watermark file exists
-				// Position: dynamic via overlay@my_overlay with eval=frame
 				filterStr = fmt.Sprintf("movie=%s [wm]; [in][wm] overlay@my_overlay=x=%d:y=%d:eval=frame [out]; zmq=b=tcp\\\\://127.0.0.1\\\\:%d", watermarkPath, xCoord, yCoord, o.zmqPort)
 			} else {
-				// Fallback to text if watermark not uploaded yet
 				filterStr = fmt.Sprintf("drawtext@my_overlay=text='Oracle Stream Studio':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.5:x=%d:y=%d:eval=frame, zmq=b=tcp\\\\://127.0.0.1\\\\:%d", xCoord, yCoord, o.zmqPort)
 			}
 			args = append(args, "-vf", filterStr)
@@ -230,6 +228,9 @@ func (o *Output) Start(broadcaster *Broadcaster) error {
 
 	o.targetRunning.Store(true)
 	o.stopCh = make(chan struct{})
+	o.lastErrorMu.Lock()
+	o.lastError = ""
+	o.lastErrorMu.Unlock()
 
 	go o.managerLoop(broadcaster)
 	go o.bitrateLoop()
@@ -270,7 +271,7 @@ func (o *Output) runProcess(broadcaster *Broadcaster) {
 		return
 	}
 	o.stdinRef.Store(&stdinWrapper{pipe: stdinPipe})
-	
+
 	stderr, err := o.cmd.StderrPipe()
 	if err != nil {
 		o.mu.Unlock()
@@ -286,11 +287,8 @@ func (o *Output) runProcess(broadcaster *Broadcaster) {
 
 	o.running.Store(true)
 	o.startTime = time.Now()
-
-	// Subscribe to broadcaster
 	o.dataCh = broadcaster.Subscribe(o.config.ID)
 
-	// Connect ZMQ client if overlay enabled
 	if o.config.OverlayEnabled && o.zmqPort > 0 {
 		go func() {
 			time.Sleep(500 * time.Millisecond)
@@ -314,7 +312,6 @@ func (o *Output) runProcess(broadcaster *Broadcaster) {
 	log.Printf("[output:%s] Started (codec=%s, PID=%d)", o.config.Name, o.config.Codec, o.cmd.Process.Pid)
 	o.appendLog(fmt.Sprintf("--- Started FFmpeg PID %d ---", o.cmd.Process.Pid))
 
-	// Stderr reader
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
@@ -326,16 +323,13 @@ func (o *Output) runProcess(broadcaster *Broadcaster) {
 		}
 	}()
 
-	// Data writer goroutine
 	go o.writeLoop()
 
-	// Wait for process to exit
 	err = o.cmd.Wait()
 	o.running.Store(false)
 
 	broadcaster.Unsubscribe(o.config.ID)
 
-	// Close ZMQ client
 	o.mu.Lock()
 	if o.zmqClient != nil {
 		o.zmqClient.Close()
@@ -372,7 +366,6 @@ func (o *Output) writeLoop() {
 				return
 			}
 
-			// Lock-free atomic load — no mutex per packet
 			v := o.stdinRef.Load()
 			if v == nil {
 				continue
@@ -382,12 +375,11 @@ func (o *Output) writeLoop() {
 				continue
 			}
 
-			_, err := wrapper.pipe.Write(data)
-			if err != nil {
+			if _, err := wrapper.pipe.Write(data); err != nil {
 				o.packetsDropped.Add(1)
 				continue
 			}
-			o.packetsSent.Add(1)
+			o.packetsSent.Add(uint64(len(data) / tsPacketSize))
 			o.bytesSent.Add(uint64(len(data)))
 			o.bitrateBytes.Add(uint64(len(data)))
 
@@ -426,15 +418,13 @@ func (o *Output) Stop(broadcaster *Broadcaster) {
 
 	select {
 	case <-o.stopCh:
-		// Already stopped
 	default:
 		close(o.stopCh)
 	}
 
-	// Kill the process — runProcess() will handle Unsubscribe when it exits
 	o.mu.Lock()
 	if o.cmd != nil && o.cmd.Process != nil {
-		o.cmd.Process.Kill()
+		_ = o.cmd.Process.Kill()
 	}
 	if o.zmqClient != nil {
 		o.zmqClient.Close()
@@ -442,7 +432,6 @@ func (o *Output) Stop(broadcaster *Broadcaster) {
 	}
 	o.mu.Unlock()
 
-	// Give runProcess a moment to clean up
 	time.Sleep(100 * time.Millisecond)
 	o.running.Store(false)
 	log.Printf("[output:%s] Stopped", o.config.Name)
@@ -462,7 +451,7 @@ func (o *Output) GetStats() OutputStats {
 	return OutputStats{
 		ID:                o.config.ID,
 		Name:              o.config.Name,
-		Running:           o.targetRunning.Load(), // Show as running if target is running (even if restarting)
+		Running:           o.targetRunning.Load(),
 		Codec:             string(o.config.Codec),
 		Bitrate:           o.config.Bitrate,
 		BytesSent:         o.bytesSent.Load(),
@@ -488,13 +477,10 @@ func (o *Output) MoveOverlay(x, y int) error {
 		return nil
 	}
 
-	// Send ZMQ command to move watermark on overlay filter instance "my_overlay"
-	_, err := o.zmqClient.SendCommand("my_overlay", "x", fmt.Sprintf("%d", x))
-	if err != nil {
+	if _, err := o.zmqClient.SendCommand("my_overlay", "x", fmt.Sprintf("%d", x)); err != nil {
 		return fmt.Errorf("failed to send x coordinate: %w", err)
 	}
-	_, err = o.zmqClient.SendCommand("my_overlay", "y", fmt.Sprintf("%d", y))
-	if err != nil {
+	if _, err := o.zmqClient.SendCommand("my_overlay", "y", fmt.Sprintf("%d", y)); err != nil {
 		return fmt.Errorf("failed to send y coordinate: %w", err)
 	}
 
@@ -571,7 +557,7 @@ func (om *OutputManager) UpdateOutput(id string, config OutputConfig) error {
 	om.outputs[id] = NewOutput(config, om.dataDir)
 
 	if wasRunning {
-		om.outputs[id].Start(om.broadcaster)
+		_ = om.outputs[id].Start(om.broadcaster)
 	}
 
 	om.saveConfig()
@@ -582,7 +568,6 @@ func (om *OutputManager) StartOutput(id string) error {
 	om.mu.Lock()
 	output, exists := om.outputs[id]
 	if exists {
-		// Validate RTMP URL (Stage 6)
 		url := output.config.URL
 		if !strings.HasPrefix(url, "rtmp://") && !strings.HasPrefix(url, "rtmps://") {
 			om.mu.Unlock()
@@ -626,16 +611,11 @@ func (om *OutputManager) MoveOverlay(id string, x, y int) error {
 		return fmt.Errorf("output %s not found", id)
 	}
 
-	// Update coordinates in the config
 	output.config.OverlayX = x
 	output.config.OverlayY = y
 
-	// Call MoveOverlay on the actual output (sends via ZMQ if active)
 	err := output.MoveOverlay(x, y)
-
-	// Save coordinates to outputs.json
 	om.saveConfig()
-
 	return err
 }
 
@@ -692,13 +672,12 @@ func (om *OutputManager) RestartAll() {
 		if o.targetRunning.Load() {
 			o.Stop(om.broadcaster)
 			time.Sleep(200 * time.Millisecond)
-			o.Start(om.broadcaster)
+			_ = o.Start(om.broadcaster)
 		}
 	}
 	log.Printf("[outputs] All running outputs restarted")
 }
 
-// Config persistence
 type savedConfig struct {
 	Outputs []OutputConfig `json:"outputs"`
 }
@@ -725,7 +704,7 @@ func (om *OutputManager) saveConfig() {
 func (om *OutputManager) loadConfig() {
 	data, err := os.ReadFile(om.configPath)
 	if err != nil {
-		return // File doesn't exist yet
+		return
 	}
 
 	var cfg savedConfig

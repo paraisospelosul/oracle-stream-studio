@@ -15,7 +15,6 @@ import (
 )
 
 func main() {
-	// Configure default slog JSON handler
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
@@ -33,7 +32,7 @@ func main() {
 	tlsKey := flag.String("tls-key", "", "Path to TLS private key file")
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Oracle Stream Studio v1.9.0 — H.265 Failover Relay + Multi-Output RTMP\n\n")
+		fmt.Fprintf(os.Stderr, "Oracle Stream Studio v2.0 — Ultra-Light H.265 Failover Relay (2-OCPU Edition)\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: oracle-stream-studio [flags]\n\nFlags:\n")
 		flag.PrintDefaults()
 	}
@@ -48,7 +47,6 @@ func main() {
 		}
 	}
 
-	// Load .env
 	loadEnvFile(filepath.Join(*dataDir, ".env"))
 	loadEnvFile(".env")
 
@@ -103,25 +101,22 @@ func main() {
 
 	configPath := filepath.Join(*dataDir, "outputs.json")
 	switcherConfigPath := filepath.Join(*dataDir, "switcher.json")
+	sceneConfigPath := filepath.Join(*dataDir, "scenes.json")
 
 	os.MkdirAll(*dataDir, 0755)
 
-	fmt.Println("╔═══════════════════════════════════════════════╗")
-	fmt.Println("║        Oracle Stream Studio v1.9.0            ║")
-	fmt.Println("║   H.265 Failover Relay + Multi-Output RTMP    ║")
-	fmt.Println("╚═══════════════════════════════════════════════╝")
+	fmt.Println("╔══════════════════════════════════════════════════════╗")
+	fmt.Println("║      Oracle Stream Studio v2.0 (Ultra-Light)         ║")
+	fmt.Println("║  RAM Slate Failover + Zero-Decode H.265 Passthrough  ║")
+	fmt.Println("╚══════════════════════════════════════════════════════╝")
 	fmt.Println()
 	log.Printf("SRT Source:    %s (mode: %s)", *srtAddr, *srtMode)
-	log.Printf("Fallback:      %s", *fallbackPath)
 	if *tlsCert != "" && *tlsKey != "" {
 		log.Printf("Web UI:        https://0.0.0.0:%d (SSL Enabled)", *webPort)
 	} else {
 		log.Printf("Web UI:        http://0.0.0.0:%d", *webPort)
 	}
 	log.Printf("SRT Timeout:   %d ms", *srtTimeout)
-	if *statsURL != "" {
-		log.Printf("Stats URL:     %s", *statsURL)
-	}
 	log.Printf("Data Dir:      %s", *dataDir)
 	fmt.Println()
 
@@ -139,11 +134,9 @@ func main() {
 	go sysStats.Start(ctx)
 
 	switcher := NewSwitcher(*srtAddr, *srtMode, *fallbackPath, *srtTimeout, *statsURL, *dataDir, switcherConfigPath)
-	
-	// Instantiate SceneManager
+
 	var sceneManager *SceneManager
-	sceneConfigPath := filepath.Join(*dataDir, "scenes.json")
-	sceneManager = NewSceneManager(*dataDir, sceneConfigPath, func() {
+	sceneManager = NewSceneManager(*dataDir, sceneConfigPath, switcher.GetConfig().FallbackResolution, func() {
 		if sceneManager != nil {
 			if active := sceneManager.GetActiveScene(); active != nil {
 				switcher.UpdateFallbackPath(active.FilePath)
@@ -151,52 +144,44 @@ func main() {
 			}
 		}
 	})
-
-	// Set initial fallback path from active scene if it exists
+	switcher.AttachSceneManager(sceneManager)
 	if active := sceneManager.GetActiveScene(); active != nil {
 		switcher.UpdateFallbackPath(active.FilePath)
 	}
 
 	outputManager := NewOutputManager(switcher.broadcaster, configPath, *dataDir)
+	// Preview stays OFF on boot (0% CPU) until requested from Web UI
 	preview := NewPreviewManager(switcher.broadcaster)
-	go preview.Start()
-	audioMeter := NewAudioMeter(switcher.broadcaster, switcher)
-	go audioMeter.Start()
-	
+
 	if *bboxDir == "" {
 		*bboxDir = *dataDir
 	}
 	bboxManager := NewBboxManager(*bboxDir)
+	go bboxManager.StartMonitor(ctx)
+
 	recorder := NewRecorder(switcher.broadcaster, *dataDir)
 
-	// Instantiate Auto-Switch Engine (Stage 4)
-	autoSwitchConfigPath := filepath.Join(*dataDir, "autoswitch.json")
-	autoSwitch := NewAutoSwitchEngine(autoSwitchConfigPath, func(sceneID, transType string, transDurMs int) {
-		switcher.SwitchScene(sceneID, transType, transDurMs)
-	})
-	// Wire data providers
-	autoSwitch.SetProviders(
-		func() float64 { return float64(switcher.currentBitrateKbps.Load()) },
-		func() bool { return switcher.IsSRTInputActive() },
-		func() float64 { return audioMeter.GetLevels().PeakL },
+	apiServer := NewAPIServer(
+		switcher,
+		outputManager,
+		sysStats,
+		preview,
+		recorder,
+		bboxManager,
+		sceneManager,
+		*dataDir,
+		*webPort,
+		*webUser,
+		*webPass,
+		*tlsCert,
+		*tlsKey,
 	)
-	go autoSwitch.Run(ctx)
 
-	// Instantiate Scheduler (Stage 4)
-	schedulerConfigPath := filepath.Join(*dataDir, "scheduler.json")
-	scheduler := NewScheduler(schedulerConfigPath, func(sceneID, transType string, transDurMs int) {
-		switcher.SwitchScene(sceneID, transType, transDurMs)
-	})
-	go scheduler.Run(ctx)
-
-	// Pass all components to APIServer
-	apiServer := NewAPIServer(switcher, outputManager, sysStats, preview, audioMeter, recorder, bboxManager, sceneManager, autoSwitch, scheduler, *dataDir, *webPort, *webUser, *webPass, *tlsCert, *tlsKey)
-
-	// Auto-start outputs that were running
+	// Auto-start outputs that were persisted as running
 	for _, oc := range outputManager.GetOutputs() {
 		if oc.Running {
 			log.Printf("[outputs] Auto-starting output %s on boot...", oc.Name)
-			go outputManager.StartOutput(oc.ID)
+			go func(id string) { _ = outputManager.StartOutput(id) }(oc.ID)
 		}
 	}
 
@@ -217,9 +202,8 @@ func main() {
 	cancel()
 	outputManager.StopAll()
 	preview.Stop()
-	audioMeter.Stop()
 	if recorder.recording.Load() {
-		recorder.Stop()
+		_ = recorder.Stop()
 	}
 	log.Println("Oracle Stream Studio stopped.")
 }

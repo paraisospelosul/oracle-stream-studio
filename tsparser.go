@@ -1,12 +1,17 @@
 package main
 
 // MPEGTS packet parser - low-level MPEG Transport Stream utilities
-// Handles PAT/PMT parsing, PID detection, and H.265 keyframe detection
+// Handles PAT/PMT parsing, PID detection, H.265/H.264 keyframe detection, and batch alignment
 
 const (
-	tsPacketSize = 188
-	tsSyncByte   = 0x47
-	patPID       = 0x0000
+	tsPacketSize    = 188
+	tsSyncByte      = 0x47
+	patPID          = 0x0000
+	sdtPID          = 0x0011
+	nullPID         = 0x1FFF
+	defaultPMTPID   = 0x1000 // 4096
+	defaultVideoPID = 0x0100 // 256
+	defaultAudioPID = 0x0101 // 257
 )
 
 // H.265 NAL unit types that indicate keyframes (Random Access Points)
@@ -64,13 +69,7 @@ func ParsePAT(payload []byte) uint16 {
 		return 0
 	}
 
-	// Skip pointer field if present
-	offset := 0
-	if len(payload) > 0 {
-		pointerField := int(payload[0])
-		offset = 1 + pointerField
-	}
-
+	offset := 1 + int(payload[0])
 	if offset+8 > len(payload) {
 		return 0
 	}
@@ -80,13 +79,11 @@ func ParsePAT(payload []byte) uint16 {
 		return 0
 	}
 
-	// Section length
 	sectionLength := int(payload[offset+1]&0x0F)<<8 | int(payload[offset+2])
 	if sectionLength < 9 {
 		return 0
 	}
 
-	// Skip to program entries (offset + 8 = past header)
 	progOffset := offset + 8
 	endOffset := offset + 3 + sectionLength - 4 // -4 for CRC
 
@@ -109,13 +106,7 @@ func ParsePMT(payload []byte) (videoPID, audioPID uint16) {
 		return 0, 0
 	}
 
-	// Skip pointer field
-	offset := 0
-	if len(payload) > 0 {
-		pointerField := int(payload[0])
-		offset = 1 + pointerField
-	}
-
+	offset := 1 + int(payload[0])
 	if offset+12 > len(payload) {
 		return 0, 0
 	}
@@ -126,14 +117,11 @@ func ParsePMT(payload []byte) (videoPID, audioPID uint16) {
 	}
 
 	sectionLength := int(payload[offset+1]&0x0F)<<8 | int(payload[offset+2])
-
-	// Program info length
 	if offset+10 >= len(payload) {
 		return 0, 0
 	}
 	programInfoLength := int(payload[offset+10]&0x0F)<<8 | int(payload[offset+11])
 
-	// Skip to stream entries
 	streamOffset := offset + 12 + programInfoLength
 	endOffset := offset + 3 + sectionLength - 4 // -4 for CRC
 
@@ -147,11 +135,11 @@ func ParsePMT(payload []byte) (videoPID, audioPID uint16) {
 			if videoPID == 0 {
 				videoPID = elementaryPID
 			}
-		case 0x1B: // H.264/AVC (fallback detection)
+		case 0x1B: // H.264/AVC
 			if videoPID == 0 {
 				videoPID = elementaryPID
 			}
-		case 0x0F, 0x11: // AAC
+		case 0x0F, 0x11: // AAC (ADTS / LATM)
 			if audioPID == 0 {
 				audioPID = elementaryPID
 			}
@@ -179,20 +167,19 @@ func IsKeyframe(pesPayload []byte) bool {
 				nalStart = i + 4
 			}
 
-			if nalStart != -1 {
-				// Check H.264 (IDR is 5, SPS is 7, PPS is 8)
+			if nalStart != -1 && nalStart < len(pesPayload) {
+				// H.264 (IDR=5, SPS=7, PPS=8)
 				nalTypeH264 := pesPayload[nalStart] & 0x1F
 				if nalTypeH264 == 5 || nalTypeH264 == 7 || nalTypeH264 == 8 {
 					return true
 				}
 
-				// Check H.265 (IDR/CRA/BLA are 16-21, VPS/SPS/PPS are 32-34)
+				// H.265 (IDR/CRA/BLA=16..21, VPS/SPS/PPS=32..34)
 				nalTypeH265 := (pesPayload[nalStart] >> 1) & 0x3F
 				if (nalTypeH265 >= nalBlaWLP && nalTypeH265 <= nalCraNUT) || (nalTypeH265 >= 32 && nalTypeH265 <= 34) {
 					return true
 				}
 
-				// Move index to nalStart to continue searching from the data of this NAL unit
 				i = nalStart
 				continue
 			}
@@ -215,17 +202,11 @@ func ExtractPESPayload(pkt []byte, payloadOffset int) []byte {
 		return nil
 	}
 
-	// Check PES start code: 0x00 0x00 0x01
 	if payload[0] != 0x00 || payload[1] != 0x00 || payload[2] != 0x01 {
 		return nil
 	}
 
-	// PES header data length
-	if len(payload) < 9 {
-		return nil
-	}
 	pesHeaderDataLength := int(payload[8])
-
 	dataStart := 9 + pesHeaderDataLength
 	if dataStart >= len(payload) {
 		return nil
@@ -234,63 +215,74 @@ func ExtractPESPayload(pkt []byte, payloadOffset int) []byte {
 	return payload[dataStart:]
 }
 
-// PacketAligner helps align a byte stream to 188-byte MPEGTS packet boundaries
+// PacketAligner aligns an arbitrary byte stream to 188-byte MPEGTS packet boundaries
 type PacketAligner struct {
 	buf    []byte
 	synced bool
 }
 
-// NewPacketAligner creates a new PacketAligner
+// NewPacketAligner creates a PacketAligner with a reusable backing buffer
 func NewPacketAligner() *PacketAligner {
 	return &PacketAligner{
-		buf: make([]byte, 0, tsPacketSize*20),
+		buf: make([]byte, 0, tsPacketSize*64),
 	}
 }
 
-// Feed adds raw bytes to the aligner buffer
+// Feed appends raw bytes to the aligner buffer
 func (pa *PacketAligner) Feed(data []byte) {
 	pa.buf = append(pa.buf, data...)
 }
 
-// Next returns the next aligned 188-byte MPEGTS packet, or nil if not enough data
+// syncBuffer locates the MPEGTS sync boundary inside pa.buf
+func (pa *PacketAligner) syncBuffer() bool {
+	if len(pa.buf) < tsPacketSize {
+		return false
+	}
+	if pa.synced && pa.buf[0] == tsSyncByte {
+		return true
+	}
+
+	pa.synced = false
+	syncIdx := -1
+	for i := 0; i <= len(pa.buf)-tsPacketSize; i++ {
+		if pa.buf[i] == tsSyncByte {
+			if i+tsPacketSize < len(pa.buf) {
+				if pa.buf[i+tsPacketSize] == tsSyncByte {
+					syncIdx = i
+					break
+				}
+			} else {
+				syncIdx = i
+				break
+			}
+		}
+	}
+
+	if syncIdx < 0 {
+		// Keep last (tsPacketSize - 1) bytes in case a sync byte sits at the tail
+		keep := tsPacketSize - 1
+		if len(pa.buf) > keep {
+			copy(pa.buf, pa.buf[len(pa.buf)-keep:])
+			pa.buf = pa.buf[:keep]
+		}
+		return false
+	}
+
+	if syncIdx > 0 {
+		rem := len(pa.buf) - syncIdx
+		copy(pa.buf, pa.buf[syncIdx:])
+		pa.buf = pa.buf[:rem]
+	}
+	pa.synced = true
+	return len(pa.buf) >= tsPacketSize
+}
+
+// Next returns a single aligned 188-byte MPEGTS packet, or nil if not enough data
 func (pa *PacketAligner) Next() []byte {
 	for {
-		if len(pa.buf) < tsPacketSize {
+		if !pa.syncBuffer() {
 			return nil
 		}
-
-		if !pa.synced {
-			// Find sync byte
-			syncIdx := -1
-			for i := 0; i < len(pa.buf)-tsPacketSize; i++ {
-				if pa.buf[i] == tsSyncByte {
-					// Verify next packet also starts with sync byte
-					if i+tsPacketSize < len(pa.buf) && pa.buf[i+tsPacketSize] == tsSyncByte {
-						syncIdx = i
-						break
-					}
-					// If we can't verify, try anyway if it's the last possible position
-					if i+tsPacketSize >= len(pa.buf) {
-						syncIdx = i
-						break
-					}
-				}
-			}
-			if syncIdx < 0 {
-				// Discard all but last tsPacketSize bytes
-				if len(pa.buf) > tsPacketSize {
-					pa.buf = pa.buf[len(pa.buf)-tsPacketSize:]
-				}
-				return nil
-			}
-			pa.buf = pa.buf[syncIdx:]
-			pa.synced = true
-		}
-
-		if len(pa.buf) < tsPacketSize {
-			return nil
-		}
-
 		if pa.buf[0] != tsSyncByte {
 			pa.synced = false
 			continue
@@ -298,7 +290,48 @@ func (pa *PacketAligner) Next() []byte {
 
 		pkt := make([]byte, tsPacketSize)
 		copy(pkt, pa.buf[:tsPacketSize])
-		pa.buf = pa.buf[tsPacketSize:]
+		rem := len(pa.buf) - tsPacketSize
+		if rem > 0 {
+			copy(pa.buf, pa.buf[tsPacketSize:])
+		}
+		pa.buf = pa.buf[:rem]
 		return pkt
+	}
+}
+
+// NextBatch returns all contiguous aligned 188-byte MPEGTS packets currently in the buffer
+// in a single allocation, drastically reducing GC pressure, channel operations, and syscalls.
+func (pa *PacketAligner) NextBatch() []byte {
+	for {
+		if !pa.syncBuffer() {
+			return nil
+		}
+		if pa.buf[0] != tsSyncByte {
+			pa.synced = false
+			continue
+		}
+
+		validLen := 0
+		for validLen+tsPacketSize <= len(pa.buf) {
+			if pa.buf[validLen] != tsSyncByte {
+				break
+			}
+			validLen += tsPacketSize
+		}
+
+		if validLen == 0 {
+			pa.synced = false
+			continue
+		}
+
+		batch := make([]byte, validLen)
+		copy(batch, pa.buf[:validLen])
+
+		rem := len(pa.buf) - validLen
+		if rem > 0 {
+			copy(pa.buf, pa.buf[validLen:])
+		}
+		pa.buf = pa.buf[:rem]
+		return batch
 	}
 }
