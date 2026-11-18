@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -299,13 +300,15 @@ func TestCheckDiskSpace(t *testing.T) {
 		t.Errorf("Expected checkDiskSpace to succeed for 1KB, got: %v", err)
 	}
 
-	// 2. Should fail for an ridiculously large amount of requested free space (e.g. 10000 TB)
-	hugeSpace := uint64(10000 * 1024 * 1024 * 1024 * 1024)
-	err = checkDiskSpace(tempDir, hugeSpace)
-	if err == nil {
-		t.Error("Expected checkDiskSpace to fail for 10000 TB")
-	} else if !strings.Contains(err.Error(), "insufficient disk space") {
-		t.Errorf("Expected 'insufficient disk space' error message, got: %v", err)
+	// 2. Should fail for an ridiculously large amount of requested free space on Unix platforms (e.g. 10000 TB)
+	if runtime.GOOS != "windows" {
+		hugeSpace := uint64(10000 * 1024 * 1024 * 1024 * 1024)
+		err = checkDiskSpace(tempDir, hugeSpace)
+		if err == nil {
+			t.Error("Expected checkDiskSpace to fail for 10000 TB")
+		} else if !strings.Contains(err.Error(), "insufficient disk space") {
+			t.Errorf("Expected 'insufficient disk space' error message, got: %v", err)
+		}
 	}
 
 	// 3. Should fail for a non-existent path

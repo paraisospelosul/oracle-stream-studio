@@ -32,6 +32,13 @@ All notable changes to this project will be documented in this file.
 - **Persistência Fora do Lock (`scenes.go`) & Shutdown Limpo (`server.go`)**: Gravação em disco de `scenes.json` movida para fora do mutex `sm.mu` (`persistConfig`) e goroutine do `rateLimiter` encerrada via `ctx.Done()`.
 - **Refinamentos no Painel Web & Testes (`web/app.js`, `*_test.go`, `test.yml`)**: Sincronização estável do FPS do preview durante inicialização do FFmpeg, guarda contra requisições sobrepostas de frames em redes lentas e ativação de `go test -race` no GitHub Actions CI com novos testes de concorrência, B-frames multi-PID e slow subscriber.
 
+### Fixed (Revisão v2.0.2)
+- **Portabilidade Completa de `checkDiskSpace` (`diskspace_unix.go`, `diskspace_windows.go`, `server.go`)**: Isolado `syscall.Statfs_t` com build tags (`!windows` / `windows`), removendo o acoplamento direto a `syscall` no `server.go`.
+- **Ciclo de Vida Limpo de `UnsubscribeChannel` (`output.go`, `preview.go`, `recorder.go`)**: Removido o `broadcaster.Unsubscribe(id)` redundante de `Output.Stop()` e padronizado `defer broadcaster.UnsubscribeChannel(...)` em todos os consumidores (`Output`, `PreviewManager` e `Recorder`), além de atualizar `o.running` sob `o.mu.Lock()`.
+- **Persistência Fora do Lock em Todo o Sistema (`output.go`, `switcher.go`)**: Aplicado o padrão `persistConfig()` com `saveMu` também em `OutputManager` (`outputs.json`) e `Switcher` (`switcher.json`), eliminando I/O de disco dentro de `om.mu` / `configMu` (inclusive ao arrastar overlays via WebSocket).
+- **Proteção e Timeout no Remux de Gravações (`recorder.go`)**: Adicionados `context.WithTimeout` (5 minutos) via `exec.CommandContext` e `setProcessDeathSignal(cmd)` no remux `.ts -> .mp4`, prevenindo processos FFmpeg órfãos ou travados.
+- **Alinhamento de Toolchain (`go.mod`), Sanitização JS (`web/app.js`) & Novos Testes (`scenes_test.go`, `preview_test.go`, `recorder_test.go`, `switcher_test.go`)**: Atualizado `go.mod` para `go 1.23`, adicionado `encodeURIComponent` nos endpoints restantes de saídas no JS e expandida a suíte de testes unitários para cobrir `SceneManager`, `PreviewManager`, deduplicação do `Recorder` e segurança de geração do `Broadcaster`.
+
 ### Removed
 - Removidos módulos pesados ou inacabados sem uso prático em 2 OCPUs (~2.500 linhas eliminadas): `audiometer.go`, `transcoding_bridge.go` (evitando pico de 100% de CPU com `libx265` na reconexão), `transitions.go`, `pipeline_router.go` (ticker de 200 Hz), `autoswitch.go` e `scheduler.go`.
 

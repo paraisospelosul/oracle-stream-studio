@@ -114,3 +114,44 @@ func TestRecorder_JSON(t *testing.T) {
 		t.Error("Expected unmarshaled status active to be false")
 	}
 }
+
+func TestRecorder_DedupAndGuardErrors(t *testing.T) {
+	tmpDir := t.TempDir()
+	broadcaster := NewBroadcaster()
+	recorder := NewRecorder(broadcaster, tmpDir)
+
+	if err := recorder.Stop(); err == nil {
+		t.Error("Expected Stop() on idle recorder to return error")
+	}
+
+	if err := recorder.Start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	if err := recorder.Start(); err == nil {
+		t.Error("Expected second Start() while recording to return error")
+	}
+	if err := recorder.Stop(); err != nil {
+		t.Fatalf("Stop() failed: %v", err)
+	}
+
+	recFolder := filepath.Join(tmpDir, "recordings")
+	// Clear file created by Start/Stop above and test .ts/.mp4 deduplication
+	entries, _ := os.ReadDir(recFolder)
+	for _, e := range entries {
+		_ = os.Remove(filepath.Join(recFolder, e.Name()))
+	}
+
+	_ = os.WriteFile(filepath.Join(recFolder, "rec_pair.ts"), []byte("rawts"), 0644)
+	_ = os.WriteFile(filepath.Join(recFolder, "rec_pair.mp4"), []byte("mp4remuxed"), 0644)
+	_ = os.WriteFile(filepath.Join(recFolder, "rec_only_ts.ts"), []byte("rawts2"), 0644)
+
+	list := recorder.ListRecordings()
+	if len(list) != 2 {
+		t.Fatalf("Expected 2 recordings (hiding paired .ts), got %d: %+v", len(list), list)
+	}
+	for _, item := range list {
+		if item.Name == "rec_pair.ts" {
+			t.Error("Expected rec_pair.ts to be hidden when rec_pair.mp4 exists")
+		}
+	}
+}

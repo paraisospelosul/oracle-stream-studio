@@ -191,7 +191,7 @@ func (p *PreviewManager) Stop() {
 func (p *PreviewManager) runPreviewProcess(fps, width, height, quality int, stopCh chan struct{}) {
 	subID := "preview_internal"
 	dataCh := p.broadcaster.Subscribe(subID)
-	defer p.broadcaster.Unsubscribe(subID)
+	defer p.broadcaster.UnsubscribeChannel(subID, dataCh)
 
 	args := []string{
 		"-hide_banner", "-loglevel", "error",

@@ -636,7 +636,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function refreshLogs() {
         if (!currentLogsId) return;
         try {
-            const r = await fetch(`/api/outputs/${currentLogsId}/logs`);
+            const r = await fetch(`/api/outputs/${encodeURIComponent(currentLogsId)}/logs`);
             const d = await r.json();
             document.getElementById('logs-content').textContent = d.logs?.join('\n') || 'Sem logs.';
         } catch (e) { document.getElementById('logs-content').textContent = e.message; }
@@ -736,7 +736,7 @@ document.addEventListener('DOMContentLoaded', () => {
             overlay_enabled: document.getElementById('out-overlay').checked,
         };
         const method = editingOutputId ? 'PUT' : 'POST';
-        const url = editingOutputId ? `/api/outputs/${editingOutputId}` : '/api/outputs';
+        const url = editingOutputId ? `/api/outputs/${encodeURIComponent(editingOutputId)}` : '/api/outputs';
         try {
             const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
             if (r.ok) {

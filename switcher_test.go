@@ -199,3 +199,33 @@ func TestSwitcher_AudioLevelsTelemetry(t *testing.T) {
 		t.Errorf("Unexpected live AudioLevels: %+v", liveAudio)
 	}
 }
+
+func TestBroadcaster_UnsubscribeChannelGenerationSafety(t *testing.T) {
+	b := NewBroadcaster()
+	chGen1 := b.Subscribe("out-1")
+	chGen2 := b.Subscribe("out-1") // Replaces chGen1
+
+	// Stale generation 1 cleanup must NOT unsubscribe generation 2
+	b.UnsubscribeChannel("out-1", chGen1)
+	if b.SubscriberCount() != 1 {
+		t.Fatalf("Expected SubscriberCount 1 after stale UnsubscribeChannel, got %d", b.SubscriberCount())
+	}
+
+	pkt := make([]byte, tsPacketSize)
+	pkt[0] = tsSyncByte
+	b.Broadcast(pkt)
+
+	select {
+	case got := <-chGen2:
+		if len(got) != tsPacketSize {
+			t.Errorf("Expected %d bytes on chGen2, got %d", tsPacketSize, len(got))
+		}
+	default:
+		t.Error("Expected active chGen2 to receive broadcast packet")
+	}
+
+	b.UnsubscribeChannel("out-1", chGen2)
+	if b.SubscriberCount() != 0 {
+		t.Errorf("Expected SubscriberCount 0 after active UnsubscribeChannel, got %d", b.SubscriberCount())
+	}
+}

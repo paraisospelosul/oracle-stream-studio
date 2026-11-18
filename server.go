@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -236,18 +235,6 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Content-Security-Policy", "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com https://cdn.jsdelivr.net; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;")
 		next.ServeHTTP(w, r)
 	})
-}
-
-func checkDiskSpace(path string, minFreeBytes uint64) error {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(path, &stat); err != nil {
-		return err
-	}
-	freeBytes := uint64(stat.Bavail) * uint64(stat.Bsize)
-	if freeBytes < minFreeBytes {
-		return fmt.Errorf("insufficient disk space: only %d MB available, need at least %d MB", freeBytes/(1024*1024), minFreeBytes/(1024*1024))
-	}
-	return nil
 }
 
 type StatusResponse struct {

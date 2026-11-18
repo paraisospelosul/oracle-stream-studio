@@ -330,6 +330,7 @@ func (o *Output) runProcess(broadcaster *Broadcaster, stopCh chan struct{}) {
 		}(zmqPort)
 	}
 	o.mu.Unlock()
+	defer broadcaster.UnsubscribeChannel(cfg.ID, dataCh)
 
 	log.Printf("[output:%s] Started (codec=%s, PID=%d)", cfg.Name, cfg.Codec, pid)
 	o.appendLog(fmt.Sprintf("--- Started FFmpeg PID %d ---", pid))
@@ -348,7 +349,6 @@ func (o *Output) runProcess(broadcaster *Broadcaster, stopCh chan struct{}) {
 	go o.writeLoop(cfg.ID, stdinPipe, dataCh, stopCh)
 
 	err = cmd.Wait()
-	broadcaster.UnsubscribeChannel(cfg.ID, dataCh)
 
 	o.mu.Lock()
 	if o.cmd == cmd {
@@ -416,7 +416,7 @@ func (o *Output) bitrateLoop(stopCh <-chan struct{}) {
 	}
 }
 
-func (o *Output) Stop(broadcaster *Broadcaster) {
+func (o *Output) Stop() {
 	o.mu.Lock()
 	if !o.targetRunning.Load() {
 		o.mu.Unlock()
@@ -424,6 +424,7 @@ func (o *Output) Stop(broadcaster *Broadcaster) {
 	}
 
 	o.targetRunning.Store(false)
+	o.running.Store(false)
 	if !o.stopClosed && o.stopCh != nil {
 		close(o.stopCh)
 		o.stopClosed = true
@@ -436,16 +437,10 @@ func (o *Output) Stop(broadcaster *Broadcaster) {
 		o.zmqClient.Close()
 		o.zmqClient = nil
 	}
-	id := o.config.ID
 	name := o.config.Name
 	o.mu.Unlock()
 
-	if broadcaster != nil {
-		broadcaster.Unsubscribe(id)
-	}
-
 	time.Sleep(100 * time.Millisecond)
-	o.running.Store(false)
 	log.Printf("[output:%s] Stopped", name)
 	o.appendLog("--- Output stopped by user ---")
 }
@@ -508,6 +503,7 @@ func (o *Output) MoveOverlay(x, y int) error {
 type OutputManager struct {
 	outputs     map[string]*Output
 	mu          sync.RWMutex
+	saveMu      sync.Mutex
 	broadcaster *Broadcaster
 	configPath  string
 	dataDir     string
@@ -526,14 +522,14 @@ func NewOutputManager(broadcaster *Broadcaster, configPath string, dataDir strin
 
 func (om *OutputManager) AddOutput(config OutputConfig) error {
 	om.mu.Lock()
-	defer om.mu.Unlock()
-
 	if _, exists := om.outputs[config.ID]; exists {
+		om.mu.Unlock()
 		return fmt.Errorf("output %s already exists", config.ID)
 	}
-
 	om.outputs[config.ID] = NewOutput(config, om.dataDir)
-	om.saveConfig()
+	om.mu.Unlock()
+
+	om.persistConfig()
 	log.Printf("[outputs] Added output: %s (%s)", config.Name, config.ID)
 	return nil
 }
@@ -545,13 +541,13 @@ func (om *OutputManager) RemoveOutput(id string) error {
 		om.mu.Unlock()
 		return fmt.Errorf("output %s not found", id)
 	}
-
 	delete(om.outputs, id)
-	om.saveConfig()
 	om.mu.Unlock()
 
+	om.persistConfig()
+
 	if output.targetRunning.Load() {
-		output.Stop(om.broadcaster)
+		output.Stop()
 	}
 	return nil
 }
@@ -569,70 +565,67 @@ func (om *OutputManager) UpdateOutput(id string, config OutputConfig) error {
 	config.Running = wasRunning
 	newOutput := NewOutput(config, om.dataDir)
 	om.outputs[id] = newOutput
-	om.saveConfig()
 	om.mu.Unlock()
 
+	om.persistConfig()
+
 	if wasRunning {
-		oldOutput.Stop(om.broadcaster)
+		oldOutput.Stop()
 		_ = newOutput.Start(om.broadcaster)
 	}
 	return nil
 }
 
 func (om *OutputManager) StartOutput(id string) error {
-	om.mu.Lock()
+	om.mu.RLock()
 	output, exists := om.outputs[id]
-	if exists {
-		output.mu.Lock()
-		url := output.config.URL
-		if !strings.HasPrefix(url, "rtmp://") && !strings.HasPrefix(url, "rtmps://") {
-			output.mu.Unlock()
-			om.mu.Unlock()
-			return fmt.Errorf("invalid RTMP URL: must start with rtmp:// or rtmps://")
-		}
-		output.config.Running = true
-		output.mu.Unlock()
-		om.saveConfig()
-	}
-	om.mu.Unlock()
-
 	if !exists {
+		om.mu.RUnlock()
 		return fmt.Errorf("output %s not found", id)
 	}
+	output.mu.Lock()
+	url := output.config.URL
+	if !strings.HasPrefix(url, "rtmp://") && !strings.HasPrefix(url, "rtmps://") {
+		output.mu.Unlock()
+		om.mu.RUnlock()
+		return fmt.Errorf("invalid RTMP URL: must start with rtmp:// or rtmps://")
+	}
+	output.config.Running = true
+	output.mu.Unlock()
+	om.mu.RUnlock()
 
+	om.persistConfig()
 	return output.Start(om.broadcaster)
 }
 
 func (om *OutputManager) StopOutput(id string) error {
-	om.mu.Lock()
+	om.mu.RLock()
 	output, exists := om.outputs[id]
-	if exists {
-		output.mu.Lock()
-		output.config.Running = false
-		output.mu.Unlock()
-		om.saveConfig()
-	}
-	om.mu.Unlock()
-
 	if !exists {
+		om.mu.RUnlock()
 		return fmt.Errorf("output %s not found", id)
 	}
+	output.mu.Lock()
+	output.config.Running = false
+	output.mu.Unlock()
+	om.mu.RUnlock()
 
-	output.Stop(om.broadcaster)
+	om.persistConfig()
+	output.Stop()
 	return nil
 }
 
 func (om *OutputManager) MoveOverlay(id string, x, y int) error {
-	om.mu.Lock()
-	defer om.mu.Unlock()
-
+	om.mu.RLock()
 	output, exists := om.outputs[id]
+	om.mu.RUnlock()
+
 	if !exists {
 		return fmt.Errorf("output %s not found", id)
 	}
 
 	err := output.MoveOverlay(x, y)
-	om.saveConfig()
+	om.persistConfig()
 	return err
 }
 
@@ -681,7 +674,7 @@ func (om *OutputManager) StopAll() {
 	om.mu.RUnlock()
 
 	for _, o := range toStop {
-		o.Stop(om.broadcaster)
+		o.Stop()
 	}
 }
 
@@ -696,7 +689,7 @@ func (om *OutputManager) RestartAll() {
 	om.mu.RUnlock()
 
 	for _, o := range toRestart {
-		o.Stop(om.broadcaster)
+		o.Stop()
 		time.Sleep(200 * time.Millisecond)
 		_ = o.Start(om.broadcaster)
 	}
@@ -707,13 +700,19 @@ type savedConfig struct {
 	Outputs []OutputConfig `json:"outputs"`
 }
 
-func (om *OutputManager) saveConfig() {
+// persistConfig serializes and writes outputs.json outside om.mu so disk I/O never blocks output operations or stats polling.
+func (om *OutputManager) persistConfig() {
+	om.saveMu.Lock()
+	defer om.saveMu.Unlock()
+
+	om.mu.RLock()
 	cfg := savedConfig{
 		Outputs: make([]OutputConfig, 0, len(om.outputs)),
 	}
 	for _, o := range om.outputs {
 		cfg.Outputs = append(cfg.Outputs, o.getConfig())
 	}
+	om.mu.RUnlock()
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

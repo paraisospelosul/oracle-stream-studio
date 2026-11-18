@@ -217,6 +217,7 @@ func (ip *InputProcess) IsRunning() bool { return ip.running.Load() }
 type Switcher struct {
 	config     SwitcherConfig
 	configMu   sync.RWMutex
+	saveMu     sync.Mutex
 	configPath string
 	srtEnabled atomic.Bool
 
@@ -372,8 +373,9 @@ func (s *Switcher) UpdateConfig(cfg SwitcherConfig) {
 		cfg.SRTTimeout = 2000
 	}
 	s.config = cfg
-	s.saveConfig()
 	s.configMu.Unlock()
+
+	s.persistConfig()
 
 	if cfg.SRTAddr != oldAddr || cfg.SRTMode != oldMode {
 		s.RestartSRT()
@@ -388,8 +390,9 @@ func (s *Switcher) UpdateFallbackSettings(res string, waitForKeyframe bool) {
 	resChanged := s.config.FallbackResolution != res
 	s.config.FallbackResolution = res
 	s.config.WaitForKeyframe = waitForKeyframe
-	s.saveConfig()
 	s.configMu.Unlock()
+
+	s.persistConfig()
 
 	if resChanged && s.sceneManager != nil {
 		s.sceneManager.SetResolution(res)
@@ -398,14 +401,26 @@ func (s *Switcher) UpdateFallbackSettings(res string, waitForKeyframe bool) {
 
 func (s *Switcher) UpdateFallbackPath(path string) {
 	s.configMu.Lock()
-	defer s.configMu.Unlock()
 	s.config.FallbackPath = path
-	s.saveConfig()
+	s.configMu.Unlock()
+
+	s.persistConfig()
 	log.Printf("[switcher] Fallback path updated to: %s", path)
 }
 
-func (s *Switcher) saveConfig() {
-	data, _ := json.MarshalIndent(s.config, "", "  ")
+func (s *Switcher) persistConfig() {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
+	s.configMu.RLock()
+	cfg := s.config
+	s.configMu.RUnlock()
+
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		log.Printf("[switcher] Save error: %v", err)
+		return
+	}
 	_ = os.WriteFile(s.configPath, data, 0644)
 }
 

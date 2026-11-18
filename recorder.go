@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -145,13 +146,17 @@ func (r *Recorder) Stop() error {
 	if info, err := os.Stat(tsPath); err == nil && info.Size() >= tsPacketSize {
 		go func() {
 			log.Printf("[recorder] Remuxing %s -> %s", tsPath, mp4Path)
-			cmd := exec.Command("ffmpeg",
-				"-hide_banner", "-loglevel", "error",
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+
+			cmd := exec.CommandContext(ctx, "ffmpeg",
+				"-hide_banner", "-loglevel", "error", "-y",
 				"-i", tsPath,
 				"-c", "copy",
 				"-movflags", "+faststart",
 				mp4Path,
 			)
+			setProcessDeathSignal(cmd)
 			if err := cmd.Run(); err != nil {
 				log.Printf("[recorder] Remux error: %v (keeping .ts)", err)
 				return
@@ -172,7 +177,7 @@ func (r *Recorder) recordLoop(f *os.File, dataCh chan []byte, stopCh, doneCh cha
 			log.Printf("[recorder] PANIC RECOVERED in recordLoop: %v", rec)
 		}
 	}()
-	defer r.broadcaster.Unsubscribe(recorderSubID)
+	defer r.broadcaster.UnsubscribeChannel(recorderSubID, dataCh)
 
 	bufWriter := bufio.NewWriterSize(f, 256*1024)
 	defer bufWriter.Flush()
