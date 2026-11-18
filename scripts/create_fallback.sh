@@ -1,31 +1,31 @@
 #!/bin/bash
 set -e
 
-# Default values
-DURATION=60
 OUTPUT="fallback.ts"
+RESOLUTION="1920:1080"
 INPUT=""
 
-# Help message
 show_help() {
-  echo "Uso: $0 [opções] <arquivo_de_entrada>"
+  echo "Uso: $0 [opções] <imagem_ou_video>"
+  echo ""
+  echo "Nota: No Oracle Stream Studio v2.0 você pode subir .jpg/.png direto pelo Painel Web!"
+  echo "Este script é opcional caso queira pré-gerar um clipe .ts manualmente via terminal."
   echo ""
   echo "Opções:"
-  echo "  -d, --duration <segundos>   Duração do fallback em segundos (padrão: 60)"
-  echo "  -o, --output <arquivo.ts>    Caminho do arquivo de saída (padrão: fallback.ts)"
-  echo "  -h, --help                  Exibe esta ajuda"
-  echo ""
-  echo "Exemplos:"
-  echo "  $0 minha_imagem.png"
-  echo "  $0 -d 120 meu_video.mp4"
+  echo "  -r, --res <1080p|720p>       Resolução de saída (padrão: 1080p)"
+  echo "  -o, --output <arquivo.ts>    Caminho de saída (padrão: fallback.ts)"
+  echo "  -h, --help                   Exibe esta ajuda"
   exit 0
 }
 
-# Parse options
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -d|--duration)
-      DURATION="$2"
+    -r|--res)
+      if [[ "$2" == "720p" ]]; then
+        RESOLUTION="1280:720"
+      else
+        RESOLUTION="1920:1080"
+      fi
       shift 2
       ;;
     -o|--output)
@@ -35,10 +35,6 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       show_help
       ;;
-    -*)
-      echo "Opção inválida: $1"
-      show_help
-      ;;
     *)
       INPUT="$1"
       shift
@@ -46,74 +42,39 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [ -z "$INPUT" ]; then
-  echo "Erro: Nenhum arquivo de entrada especificado."
+if [ -z "$INPUT" ] || [ ! -f "$INPUT" ]; then
+  echo "Erro: Arquivo de entrada inválido."
   show_help
 fi
 
-if [ ! -f "$INPUT" ]; then
-  echo "Erro: Arquivo '$INPUT' não encontrado."
-  exit 1
-fi
+W="${RESOLUTION%%:*}"
+H="${RESOLUTION##*:}"
+VF="scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p"
+X265_PARAMS="keyint=48:min-keyint=48:bframes=0:scenecut=0:repeat-headers=1:pools=1:frame-threads=1"
 
-# Verify if ffmpeg is installed
-if ! command -v ffmpeg &> /dev/null; then
-  echo "Erro: ffmpeg não está instalado. Por favor, instale o ffmpeg primeiro."
-  exit 1
-fi
-
-echo "========================================================="
-echo " Gerando arquivo de fallback H.265 compatível"
-echo " Entrada:  $INPUT"
-echo " Saída:    $OUTPUT"
-echo " Duração:  $DURATION segundos"
-echo "========================================================="
-
-# Detect input type (image or video) based on extension
-IS_IMAGE=false
-EXT="${INPUT##*.}"
-EXT=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
-
-if [[ "$EXT" == "png" || "$EXT" == "jpg" || "$EXT" == "jpeg" || "$EXT" == "bmp" || "$EXT" == "webp" ]]; then
-  IS_IMAGE=true
-fi
-
-# Generate the H.265 MPEG-TS fallback
-if [ "$IS_IMAGE" = true ]; then
-  echo "Processando entrada como IMAGEM estática..."
-  ffmpeg -y -loop 1 -i "$INPUT" -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
-    -c:v libx265 -pix_fmt yuv420p -preset medium -r 30 -g 60 -keyint_min 60 \
-    -x265-params "keyint=60:min-keyint=60:no-scenecut=1" \
+EXT=$(echo "${INPUT##*.}" | tr '[:upper:]' '[:lower:]')
+if [[ "$EXT" == "png" || "$EXT" == "jpg" || "$EXT" == "jpeg" || "$EXT" == "webp" || "$EXT" == "bmp" ]]; then
+  echo "Gerando RAM Slate de 1.6s (${W}x${H}, 48 quadros exatos) a partir da imagem..."
+  ffmpeg -hide_banner -loglevel error -y \
+    -loop 1 -framerate 30 -t 1.6 -i "$INPUT" \
+    -f lavfi -t 1.6 -i anullsrc=channel_layout=stereo:sample_rate=48000 \
+    -map 0:v:0 -map 1:a:0 \
+    -vf "$VF" -r 30 -frames:v 48 \
+    -c:v libx265 -preset ultrafast -x265-params "$X265_PARAMS" \
     -c:a aac -b:a 128k -ar 48000 -ac 2 \
-    -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" \
-    -shortest -t "$DURATION" -f mpegts "$OUTPUT"
+    -mpegts_pmt_start_pid 0x1000 -mpegts_start_pid 0x0100 -pes_payload_size 0 \
+    -f mpegts "$OUTPUT"
 else
-  echo "Processando entrada como VÍDEO..."
-  # Check if the video has audio streams using ffprobe
-  HAS_AUDIO=$(ffprobe -v error -select_streams a -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$INPUT" || true)
-  
-  if [ -z "$HAS_AUDIO" ]; then
-    echo "Vídeo de entrada não possui áudio. Injetando áudio silencioso..."
-    ffmpeg -y -i "$INPUT" -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
-      -c:v libx265 -pix_fmt yuv420p -preset medium -r 30 -g 60 -keyint_min 60 \
-      -x265-params "keyint=60:min-keyint=60:no-scenecut=1" \
-      -c:a aac -b:a 128k -ar 48000 -ac 2 \
-      -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" \
-      -t "$DURATION" -f mpegts "$OUTPUT"
-  else
-    ffmpeg -y -i "$INPUT" \
-      -c:v libx265 -pix_fmt yuv420p -preset medium -r 30 -g 60 -keyint_min 60 \
-      -x265-params "keyint=60:min-keyint=60:no-scenecut=1" \
-      -c:a aac -b:a 128k -ar 48000 -ac 2 \
-      -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" \
-      -t "$DURATION" -f mpegts "$OUTPUT"
-  fi
+  echo "Normalizando vídeo curto (até 9.6s) para formato RAM Slate (${W}x${H})..."
+  ffmpeg -hide_banner -loglevel error -y \
+    -t 9.6 -i "$INPUT" \
+    -f lavfi -t 9.6 -i anullsrc=channel_layout=stereo:sample_rate=48000 \
+    -map 0:v:0 -map 1:a:0 \
+    -vf "$VF" -r 30 -shortest \
+    -c:v libx265 -preset ultrafast -x265-params "$X265_PARAMS" \
+    -c:a aac -b:a 128k -ar 48000 -ac 2 \
+    -mpegts_pmt_start_pid 0x1000 -mpegts_start_pid 0x0100 -pes_payload_size 0 \
+    -f mpegts "$OUTPUT"
 fi
 
-echo ""
-echo "Sucesso! Fallback H.265 gerado em: $OUTPUT"
-echo "Especificações do arquivo gerado:"
-echo " - Codec: H.265 (HEVC)"
-echo " - Resolução: 1920x1080"
-echo " - FPS: 30 (GOP 60 / 2 segundos de intervalo de keyframe)"
-echo " - Áudio: AAC 48kHz Stereo"
+echo "Pronto! Slate H.265 gerado em: $OUTPUT"

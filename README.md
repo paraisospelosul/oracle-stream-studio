@@ -36,15 +36,24 @@ Moblin/externo (H.265) → SRTLA://ip-vps:5000/Bbox → SRT:8282 → SRT → [Or
 | **H.265 Passthrough** | ~0% | YouTube (Enhanced RTMP) |
 | **H.264 Transcode** | ~50% (2 cores) | Twitch, Kick, Facebook |
 
-## Instalação rápida (VPS Oracle)
+## Instalação & Atualização Inteligente (VPS Oracle ARM64 / AMD64)
 
 ```bash
 git clone https://github.com/paraisospelosul/oracle-stream-studio.git /opt/oracle-stream-studio
 cd /opt/oracle-stream-studio
-bash scripts/install.sh
+sudo bash scripts/install.sh
 ```
 
-O script instala: FFmpeg 7.0+, Go, compila o Oracle Stream Studio, e configura o systemd.
+O novo instalador `v2.0` detecta automaticamente a arquitetura (`ARM64` Ampere ou `AMD64`) e busca sempre as **versões mais recentes** em tempo real:
+- **Go:** consulta a última versão estável oficial em `go.dev/VERSION`.
+- **FFmpeg + FFprobe:** baixa a última build estática GPL (`BtbN/FFmpeg-Builds`) com suporte completo a Enhanced RTMP H.265.
+- **Belabox Receiver (`bbox`):** descobre a última release no GitHub/Docker Hub **ou** permite compilar direto do código-fonte mais recente (`HEAD`) da `IRLServer` (`srt` + `srtla` + `irl-srt-server`), rodando em `network_mode: "host"`.
+- **Tuning de Rede:** opção integrada para ativar `TCP BBR` e buffers UDP de `16 MB` (`scripts/optimize_kernel.sh`).
+
+Para atualizar tudo (código, Go, FFmpeg, Bbox e bibliotecas) no futuro com um comando:
+```bash
+sudo bash /opt/oracle-stream-studio/scripts/update.sh
+```
 
 ## Uso manual
 
@@ -135,13 +144,13 @@ curl -X POST http://localhost/api/outputs \
   }'
 ```
 
-## Requisitos do VPS
+## Requisitos do VPS (Otimizado para Novo Oracle Free Tier)
 
 - **OS:** Ubuntu 22.04+ ou Oracle Linux 9
-- **CPU:** 4 cores (ARM Ampere recomendado)
-- **RAM:** 4GB+ (24GB ideal)
+- **CPU:** **2 OCPUs ARM64 Ampere A1** (sem necessidade de GPU!)
+- **RAM:** **12 GB** (usa ~120 MB em operação com cenas em RAM)
 - **FFmpeg:** 7.0+ (para Enhanced RTMP H.265)
-- **Rede:** Porta 80 TCP (Web UI), porta SRT (UDP)
+- **Rede:** Porta 80/443 TCP (Web UI), porta 5000 UDP (SRTLA / Belabox)
 
 ## Requisitos do fallback
 

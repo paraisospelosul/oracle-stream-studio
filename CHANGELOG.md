@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.0] - 2026-11-17 — Ultra-Light 2-OCPU ARM64 Edition
+
+### Added
+- **Motor RAM Slate Frame-Sliced (`slate.go` + `scenes.go`)**: Converte imagens estáticas (`.jpg`, `.png`, `.webp` — com `scale + pad` automático para 16:9, inclusive fotos verticais ou 4K) em um micro-clipe MPEG-TS de **1,6s exatos** (`48` quadros de vídeo a 30 fps = `75` quadros AAC a 48 kHz = zero deriva A/V), fatiado quadro a quadro na RAM (~50–150 KB por cena).
+- **Card Prático de Fallback + Modo Pausa / BRB na Tela Principal (`web/index.html`, `web/app.js`, `server.go`)**:
+  - Miniaturas visuais das cenas carregadas na RAM com troca em **1 clique (0 ms)**.
+  - Botão **`⏸ Pausar Live (Modo BRB)` / `▶ Voltar pro Ao Vivo`** que permite exibir a cena de fallback instantaneamente mantendo o sinal SRT do Moblin aquecido em espera (`📡 Sinal Moblin pronto em espera`).
+  - Seleção de resolução do fallback (`1080p` ou `720p`) e modo de retorno (`Corte Imediato 0ms` ou `Aguardar 1º Keyframe`) direto pelo painel.
+- **Barra de Áudio Básica Zero-CPU (`switcher.go`, `web/index.html`)**: Indicador leve de presença/bitrate de áudio calculado na mesma passada dos pacotes TS, com **0% de uso extra de CPU** e zero processos FFmpeg auxiliares.
+- **Novo Instalador Inteligente & Atualizador (`scripts/install.sh`, `scripts/update.sh`)**:
+  - Detecta automaticamente `ARM64` (`aarch64`) vs `AMD64` (`x86_64`).
+  - Busca dinamicamente a **última versão estável do Go** em `go.dev/VERSION`.
+  - Baixa a **build estática GPL mais recente do FFmpeg + FFprobe** (`BtbN/FFmpeg-Builds`) com suporte atualizado a Enhanced RTMP (H.265).
+  - Consulta as APIs do GitHub e Docker Hub para instalar a **última versão do Belabox Receiver (`bbox`)** ou compilar localmente direto do `HEAD` dos repositórios `IRLServer` (`srt` + `srtla` + `irl-srt-server`), além de botão **`⬆ Atualizar Bbox`** direto no Painel Web.
+
+### Changed
+- **Passthrough Puro de Áudio + Vídeo no H.265 (`output.go`)**: Alterado `-c:a aac` para `-c:a copy` no modo H.265 Passthrough e removido `-use_wallclock_as_timestamps 1` (evitando quebra na ordem de apresentação dos B-frames do encoder de hardware do iPhone).
+- **PTS/DTS Monotônico + Reescrita de Continuity Counter (`pts_remapper.go`)**: Implementado `Continuity Counter` contínuo (`0..15`) por PID conforme ISO/IEC 13818-1, proteção contra colisão de `DTS` em streams com B-frames, padronização de PIDs (`PMT=0x1000`, `Vídeo=256`, `Áudio=257`, `-pes_payload_size 0`) e remoção do `remapper.Reset()` nas quedas.
+- **Batching de Pacotes MPEG-TS (`tsparser.go`, `switcher.go`)**: Novo `PacketAligner.NextBatch()` reduzindo alocações, operações de canal e syscalls `write()` em ~30x, além de escrita em disco com buffer de 256 KB no `recorder.go`.
+- **Preview Sob Demanda (`preview.go`)**: Inicia desligado (`0 fps` / `0% CPU`) no boot, decodifica apenas keyframes (`-skip_frame nokey -threads 1`) em 1–2 fps e desliga sozinho após 30s sem abas abertas no navegador.
+- **Monitoramento Leve do Docker Bbox (`bbox.go`)**: Removido o polling HTTP a cada 3s do navegador e o duplo fork do `docker compose`; status agora é verificado de forma leve a cada 5s e enviado via WebSocket. Container configurado com `network_mode: "host"` e `cpus: "0.5"`.
+
+### Removed
+- Removidos módulos pesados ou inacabados sem uso prático em 2 OCPUs (~2.500 linhas eliminadas): `audiometer.go`, `transcoding_bridge.go` (evitando pico de 100% de CPU com `libx265` na reconexão), `transitions.go`, `pipeline_router.go` (ticker de 200 Hz), `autoswitch.go` e `scheduler.go`.
+
 ## [1.8.2] - 2026-06-08
 
 ### Added

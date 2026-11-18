@@ -1,84 +1,347 @@
 #!/bin/bash
-set -e
+# ==============================================================================
+# Oracle Stream Studio v2.0 — Instalador Inteligente & Atualizador (2-OCPU ARM64/AMD64)
+# ==============================================================================
+# PRINCIPAIS MUDANÇAS DESTA VERSÃO DO INSTALADOR:
+# 1. Detecção automática de arquitetura (ARM64 Ampere aarch64 vs x86_64 amd64).
+# 2. Busca dinâmica da última versão estável do Go direto da API oficial (go.dev/VERSION).
+# 3. Instalação da build estática mais recente do FFmpeg + FFprobe (BtbN/FFmpeg-Builds)
+#    com suporte completo a Enhanced RTMP (H.265), libx265, libsrt e libzmq
+#    (evitando o FFmpeg antigo dos repositórios apt padrão do Ubuntu).
+# 4. Seletor inteligente do Belabox SRTLA Receiver (bbox):
+#    - Consulta a API do GitHub/Docker Hub em tempo real para descobrir a última tag;
+#    - Permite usar a imagem oficial mais recente (pull_policy: always) OU compilar
+#      direto do último commit (HEAD) dos repositórios IRLServer (srt + srtla + sls)!
+# 5. Container bbox otimizado para 2 OCPUs (network_mode: "host" sem overhead de NAT UDP,
+#    cpus: "0.5", mem_limit: 512m e rotação de logs).
+# 6. Opção de atualizar dependências do Go (go get -u) e aplicar tuning de Kernel (BBR + buffers UDP).
+# 7. Correção do arquivo systemd (expansão real de WEB_USER / WEB_PASS e LimitNOFILE=65536).
+# 8. Sem geração lenta de vídeo de 60s no install: o binário v2.0 gera o RAM Slate de 1.6s em <0.5s!
+# ==============================================================================
 
-# Make sure the script is run as root
-if [ "$EUID" -ne 0 ]; then
-  echo "Please run as root (sudo ./install.sh)"
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+log()  { echo -e "${GREEN}[install]${NC} $1"; }
+warn() { echo -e "${YELLOW}[aviso]${NC} $1"; }
+err()  { echo -e "${RED}[erro]${NC} $1"; }
+
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+  err "Execute como root: sudo bash scripts/install.sh"
   exit 1
 fi
 
-echo "==========================================="
-echo " Installing Oracle Stream Studio + Belabox Receiver"
-echo "==========================================="
-echo ""
-echo "Please set up a username and password to protect the Web Panel:"
-read -p "Username (default: belabox): " WEB_USER
-WEB_USER=${WEB_USER:-belabox}
-read -s -p "Password (default: belabox): " WEB_PASS
-echo ""
-WEB_PASS=${WEB_PASS:-belabox}
+AUTO_MODE=false
+UPDATE_MODE=false
+for arg in "$@"; do
+  case "$arg" in
+    --auto|-y) AUTO_MODE=true ;;
+    --update|-u) UPDATE_MODE=true ;;
+  esac
+done
 
-# Update and install dependencies
-echo "[1/6] Installing system dependencies..."
-apt-get update
-apt-get install -y ffmpeg curl wget git jq net-tools
-
-# Install Docker if not present
-if ! command -v docker &> /dev/null; then
-    echo "[2/6] Installing Docker..."
-    curl -fsSL https://get.docker.com -o get-docker.sh
-    sh get-docker.sh
-    rm get-docker.sh
-else
-    echo "[2/6] Docker already installed, skipping..."
+IS_TTY=false
+if [ -t 0 ] && [ "$AUTO_MODE" = false ]; then
+  IS_TTY=true
 fi
 
-# Install Go if not present
-if ! command -v go &> /dev/null; then
-    echo "[3/6] Installing Go..."
-    wget https://go.dev/dl/go1.22.2.linux-amd64.tar.gz
-    rm -rf /usr/local/go
-    tar -C /usr/local -xzf go1.22.2.linux-amd64.tar.gz
-    rm go1.22.2.linux-amd64.tar.gz
-    export PATH=$PATH:/usr/local/go/bin
+ask_choice() {
+  local prompt="$1"
+  local default="$2"
+  if [ "$IS_TTY" = true ]; then
+    local ans=""
+    read -r -p "$prompt [$default]: " ans
+    echo "${ans:-$default}"
+  else
+    echo "$default"
+  fi
+}
+
+echo -e "${CYAN}================================================================${NC}"
+echo -e "${CYAN}   Oracle Stream Studio v2.0 — Instalador Inteligente (2-OCPU)  ${NC}"
+echo -e "${CYAN}================================================================${NC}"
+echo ""
+
+# ------------------------------------------------------------------------------
+# 0. Detectar Arquitetura da CPU (ARM64 Ampere vs AMD64)
+# ------------------------------------------------------------------------------
+RAW_ARCH="$(uname -m)"
+case "$RAW_ARCH" in
+  aarch64|arm64)
+    GO_ARCH="arm64"
+    BTBN_ARCH="linuxarm64"
+    ;;
+  x86_64|amd64)
+    GO_ARCH="amd64"
+    BTBN_ARCH="linux64"
+    ;;
+  *)
+    err "Arquitetura de CPU não suportada: $RAW_ARCH"
+    exit 1
+    ;;
+esac
+log "Arquitetura detectada: ${RAW_ARCH} (Go=${GO_ARCH}, FFmpeg=${BTBN_ARCH})"
+
+# ------------------------------------------------------------------------------
+# 1. Credenciais do Painel Web (preserva valores atuais em modo --update)
+# ------------------------------------------------------------------------------
+EXISTING_SERVICE="/etc/systemd/system/oracle-stream-studio.service"
+DEFAULT_WEB_USER="belabox"
+DEFAULT_WEB_PASS="belabox"
+
+if [ -f "$EXISTING_SERVICE" ]; then
+  SAVED_USER=$(grep -E '^Environment="WEB_USER=' "$EXISTING_SERVICE" | sed -E 's/^Environment="WEB_USER=(.*)"/\1/' || true)
+  SAVED_PASS=$(grep -E '^Environment="WEB_PASS=' "$EXISTING_SERVICE" | sed -E 's/^Environment="WEB_PASS=(.*)"/\1/' || true)
+  [ -n "$SAVED_USER" ] && [ "$SAVED_USER" != '${WEB_USER}' ] && DEFAULT_WEB_USER="$SAVED_USER"
+  [ -n "$SAVED_PASS" ] && [ "$SAVED_PASS" != '${WEB_PASS}' ] && DEFAULT_WEB_PASS="$SAVED_PASS"
+fi
+
+if [ "$IS_TTY" = true ] && [ "$UPDATE_MODE" = false ]; then
+  echo ""
+  echo "Configure o login de proteção do Painel Web:"
+  read -r -p "Usuário (padrão: ${DEFAULT_WEB_USER}): " INPUT_USER
+  WEB_USER="${INPUT_USER:-$DEFAULT_WEB_USER}"
+  read -r -s -p "Senha (padrão: manter/belabox): " INPUT_PASS
+  echo ""
+  WEB_PASS="${INPUT_PASS:-$DEFAULT_WEB_PASS}"
+else
+  WEB_USER="$DEFAULT_WEB_USER"
+  WEB_PASS="$DEFAULT_WEB_PASS"
+fi
+
+# ------------------------------------------------------------------------------
+# 2. Dependências Base do Sistema
+# ------------------------------------------------------------------------------
+log "[1/7] Atualizando pacotes básicos do sistema..."
+apt-get update -qq
+apt-get install -y -qq curl wget git jq xz-utils tar ca-certificates net-tools
+
+# ------------------------------------------------------------------------------
+# 3. FFmpeg + FFprobe (Última Build Estática GPL ou APT)
+# ------------------------------------------------------------------------------
+log "[2/7] Verificando FFmpeg (necessário 6.1+ / 7.0+ para H.265 Enhanced RTMP)..."
+CURRENT_FFMPEG="não instalado"
+if command -v ffmpeg &>/dev/null; then
+  CURRENT_FFMPEG="$(ffmpeg -version | head -n1)"
+fi
+echo "  -> Atual: ${CURRENT_FFMPEG}"
+echo "  Opções de FFmpeg:"
+echo "    [1] Baixar FFmpeg + FFprobe Estático Mais Recente (BtbN GitHub Latest - Recomendado)"
+echo "    [2] Usar FFmpeg do repositório APT do Ubuntu/Debian"
+echo "    [3] Manter FFmpeg atual sem alterar"
+DEFAULT_FFMPEG_OPT="1"
+if [ "$CURRENT_FFMPEG" != "não instalado" ] && [ "$UPDATE_MODE" = false ]; then
+  DEFAULT_FFMPEG_OPT="1"
+fi
+FFMPEG_CHOICE="$(ask_choice "Escolha a opção de FFmpeg (1/2/3)" "$DEFAULT_FFMPEG_OPT")"
+
+install_static_ffmpeg() {
+  local url="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-${BTBN_ARCH}-gpl.tar.xz"
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  log "Baixando FFmpeg estático mais recente (${BTBN_ARCH})..."
+  if curl -fL --retry 3 --connect-timeout 15 "$url" -o "${tmp_dir}/ffmpeg.tar.xz"; then
+    tar -xJf "${tmp_dir}/ffmpeg.tar.xz" -C "$tmp_dir"
+    local bin_dir
+    bin_dir="$(find "$tmp_dir" -type f -name ffmpeg -exec dirname {} \; | head -n1)"
+    if [ -n "$bin_dir" ]; then
+      install -m 0755 "${bin_dir}/ffmpeg" /usr/local/bin/ffmpeg
+      install -m 0755 "${bin_dir}/ffprobe" /usr/local/bin/ffprobe
+      rm -rf "$tmp_dir"
+      hash -r || true
+      log "FFmpeg atualizado em /usr/local/bin: $(/usr/local/bin/ffmpeg -version | head -n1)"
+      return 0
+    fi
+  fi
+  rm -rf "$tmp_dir"
+  return 1
+}
+
+case "$FFMPEG_CHOICE" in
+  1)
+    if ! install_static_ffmpeg; then
+      warn "Falha ao baixar build estática do GitHub; instalando via APT como fallback..."
+      apt-get install -y ffmpeg
+    fi
+    ;;
+  2)
+    apt-get install -y ffmpeg
+    ;;
+  3)
+    if ! command -v ffmpeg &>/dev/null; then
+      apt-get install -y ffmpeg
+    fi
+    ;;
+esac
+
+# ------------------------------------------------------------------------------
+# 4. Docker Engine + Compose v2 + Log Rotation
+# ------------------------------------------------------------------------------
+log "[3/7] Verificando Docker e Docker Compose v2..."
+if ! command -v docker &>/dev/null; then
+  log "Instalando versão mais recente do Docker..."
+  curl -fsSL https://get.docker.com | sh
+elif [ "$UPDATE_MODE" = true ]; then
+  log "Verificando atualizações do Docker Engine / Compose Plugin..."
+  apt-get install -y --only-upgrade docker-ce docker-ce-cli containerd.io docker-compose-plugin 2>/dev/null || true
+fi
+
+# Garante rotação de logs do Docker para não lotar o disco de boot da Oracle
+mkdir -p /etc/docker
+if [ ! -f /etc/docker/daemon.json ]; then
+  cat << 'EOF' > /etc/docker/daemon.json
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  }
+}
+EOF
+  systemctl restart docker || true
+fi
+
+# ------------------------------------------------------------------------------
+# 5. Go Toolchain — Busca Dinâmica da Última Versão Estável em go.dev
+# ------------------------------------------------------------------------------
+log "[4/7] Consultando última versão estável do Go em go.dev..."
+export PATH="/usr/local/go/bin:${PATH}"
+
+LATEST_GO_VERSION="$(curl -fsSL --connect-timeout 10 'https://go.dev/VERSION?m=text' | head -n1 | tr -d '\r\n' || true)"
+if [[ ! "$LATEST_GO_VERSION" =~ ^go[0-9]+\.[0-9]+ ]]; then
+  LATEST_GO_VERSION="go1.23.6"
+  warn "Não foi possível consultar go.dev; usando fallback seguro ${LATEST_GO_VERSION}"
+fi
+
+INSTALLED_GO_VERSION="nenhuma"
+if [ -x /usr/local/go/bin/go ]; then
+  INSTALLED_GO_VERSION="$(/usr/local/go/bin/go version | awk '{print $3}')"
+elif command -v go &>/dev/null; then
+  INSTALLED_GO_VERSION="$(go version | awk '{print $3}')"
+fi
+
+echo "  -> Go instalado: ${INSTALLED_GO_VERSION} | Última oficial: ${LATEST_GO_VERSION}"
+INSTALL_GO="s"
+if [ "$INSTALLED_GO_VERSION" = "$LATEST_GO_VERSION" ]; then
+  INSTALL_GO="n"
+  log "Go já está na última versão (${LATEST_GO_VERSION})."
+elif [ "$INSTALLED_GO_VERSION" != "nenhuma" ]; then
+  INSTALL_GO="$(ask_choice "Atualizar Go de ${INSTALLED_GO_VERSION} para ${LATEST_GO_VERSION}? (s/n)" "s")"
+fi
+
+if [[ "$INSTALL_GO" =~ ^[sSyY] ]]; then
+  GO_TARBALL="${LATEST_GO_VERSION}.linux-${GO_ARCH}.tar.gz"
+  log "Baixando e instalando ${GO_TARBALL}..."
+  curl -fL --retry 3 "https://go.dev/dl/${GO_TARBALL}" -o "/tmp/${GO_TARBALL}"
+  rm -rf /usr/local/go
+  tar -C /usr/local -xzf "/tmp/${GO_TARBALL}"
+  rm -f "/tmp/${GO_TARBALL}"
+  if ! grep -q "/usr/local/go/bin" /etc/profile; then
     echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
-else
-    echo "[3/6] Go already installed, skipping..."
+  fi
+  log "Go instalado com sucesso: $(/usr/local/go/bin/go version)"
 fi
 
-# Set path for this session just in case
-export PATH=$PATH:/usr/local/go/bin
-
-# Create directory structure
-echo "[4/6] Setting up directories..."
+# ------------------------------------------------------------------------------
+# 6. Preparar Diretório /opt/oracle-stream-studio
+# ------------------------------------------------------------------------------
+log "[5/7] Preparando código-fonte em /opt/oracle-stream-studio..."
 mkdir -p /opt/oracle-stream-studio
 
-# Copy repo files to /opt/oracle-stream-studio if run from a different location
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
 if [ "$REPO_DIR" != "/opt/oracle-stream-studio" ] && [ -f "$REPO_DIR/main.go" ]; then
-    echo "Copying repository files from $REPO_DIR to /opt/oracle-stream-studio..."
-    # Copy files excluding hidden ones to avoid copying .git/ if we don't want to, but copying everything is fine
-    cp -r "$REPO_DIR"/* /opt/oracle-stream-studio/
+  log "Sincronizando arquivos de ${REPO_DIR} para /opt/oracle-stream-studio..."
+  cp -a "$REPO_DIR"/. /opt/oracle-stream-studio/
+elif [ "$UPDATE_MODE" = true ] && [ -d "/opt/oracle-stream-studio/.git" ]; then
+  log "Baixando últimos commits do GitHub (git pull)..."
+  git -C /opt/oracle-stream-studio pull --ff-only || warn "git pull ignorado (alterações locais presentes)."
 fi
 
 cd /opt/oracle-stream-studio
 
-# Setup Belabox Receiver initial files
-echo "[5/6] Setting up Belabox Receiver (Docker)..."
+# ------------------------------------------------------------------------------
+# 7. Belabox SRTLA Receiver (Bbox) — Descoberta da Versão Mais Recente
+# ------------------------------------------------------------------------------
+log "[6/7] Configurando Belabox SRTLA Receiver (bbox)..."
 
-cat << 'EOF' > docker-compose.yml
+# Consulta a última release no GitHub (datagutt/bbox-receiver) e tags recentes no Docker Hub
+LATEST_BBOX_RELEASE="$(curl -fsSL --connect-timeout 8 'https://api.github.com/repos/datagutt/bbox-receiver/releases/latest' | jq -r '.tag_name // empty' 2>/dev/null | sed 's/^v//' || true)"
+RECENT_DOCKER_TAGS="$(curl -fsSL --connect-timeout 8 'https://hub.docker.com/v2/repositories/datagutt/belabox-receiver/tags?page_size=8' | jq -r '.results[].name' 2>/dev/null | tr '\n' ' ' || true)"
+
+RECOMMENDED_BBOX_TAG="latest"
+if [ -n "$LATEST_BBOX_RELEASE" ]; then
+  # Verifica se a tag numérica da última release existe no Docker Hub
+  if echo " $RECENT_DOCKER_TAGS " | grep -q " ${LATEST_BBOX_RELEASE} "; then
+    RECOMMENDED_BBOX_TAG="$LATEST_BBOX_RELEASE"
+  fi
+fi
+
+echo ""
+echo "  Versões detectadas do Belabox Receiver (datagutt/belabox-receiver):"
+echo "  -> Última Release GitHub: ${LATEST_BBOX_RELEASE:-desconhecida}"
+echo "  -> Tags recentes no Docker Hub: ${RECENT_DOCKER_TAGS:-latest}"
+echo ""
+echo "  Como deseja instalar/atualizar o Bbox?"
+echo "    [1] Imagem Docker Oficial Mais Recente (datagutt/belabox-receiver:${RECOMMENDED_BBOX_TAG} — Recomendado)"
+echo "    [2] Compilar Localmente do Código-Fonte Mais Novo (IRLServer Git HEAD: srt + srtla + irl-srt-server)"
+echo "    [3] Escolher/digitar uma tag manualmente (ex: latest ou ${LATEST_BBOX_RELEASE:-3.7.1})"
+BBOX_MODE="$(ask_choice "Escolha o modo do Bbox (1/2/3)" "1")"
+
+BBOX_IMAGE="datagutt/belabox-receiver:${RECOMMENDED_BBOX_TAG}"
+BBOX_PULL_POLICY="always"
+
+case "$BBOX_MODE" in
+  2)
+    log "Compilando Bbox localmente a partir do código-fonte mais recente da IRLServer..."
+    BBOX_BUILD_DIR="$(mktemp -d)"
+    git clone --depth 1 https://github.com/datagutt/bbox-receiver.git "$BBOX_BUILD_DIR"
+
+    # Descobre os últimos hashes (HEAD) em tempo real nos repositórios IRLServer
+    SRT_HEAD="$(git ls-remote https://github.com/IRLServer/srt.git refs/heads/belabox-dev | awk '{print $1}' || true)"
+    [ -z "$SRT_HEAD" ] && SRT_HEAD="$(git ls-remote https://github.com/IRLServer/srt.git refs/heads/belabox | awk '{print $1}' || true)"
+    SRTLA_HEAD="$(git ls-remote https://github.com/IRLServer/srtla.git refs/heads/main | awk '{print $1}' || true)"
+    SLS_HEAD="$(git ls-remote https://github.com/IRLServer/irl-srt-server.git refs/heads/main | awk '{print $1}' || true)"
+
+    BUILD_ARGS=()
+    [ -n "$SRT_HEAD" ]   && BUILD_ARGS+=(--build-arg "BELABOX_SRT_VERSION=${SRT_HEAD}")
+    [ -n "$SRTLA_HEAD" ] && BUILD_ARGS+=(--build-arg "SRTLA_VERSION=${SRTLA_HEAD}")
+    [ -n "$SLS_HEAD" ]   && BUILD_ARGS+=(--build-arg "SRT_LIVE_SERVER_VERSION=${SLS_HEAD}")
+
+    log "Hashes IRLServer HEAD: SRT=${SRT_HEAD:0:8} | SRTLA=${SRTLA_HEAD:0:8} | SLS=${SLS_HEAD:0:8}"
+    if docker build "${BUILD_ARGS[@]}" -t bbox-local:latest "$BBOX_BUILD_DIR"; then
+      BBOX_IMAGE="bbox-local:latest"
+      BBOX_PULL_POLICY="never"
+      log "Imagem bbox-local:latest compilada com sucesso!"
+    else
+      warn "Falha na compilação local; usando imagem oficial ${BBOX_IMAGE} como fallback."
+    fi
+    rm -rf "$BBOX_BUILD_DIR"
+    ;;
+  3)
+    CUSTOM_TAG="$(ask_choice "Digite a tag desejada para datagutt/belabox-receiver" "${RECOMMENDED_BBOX_TAG}")"
+    BBOX_IMAGE="datagutt/belabox-receiver:${CUSTOM_TAG}"
+    ;;
+  *)
+    BBOX_IMAGE="datagutt/belabox-receiver:${RECOMMENDED_BBOX_TAG}"
+    ;;
+esac
+
+# Otimizado para 2 OCPUs: network_mode: "host" elimina overhead de NAT/conntrack nos pacotes UDP SRTLA!
+cat << EOF > docker-compose.yml
 services:
   bbox:
-    image: datagutt/belabox-receiver:latest
+    image: ${BBOX_IMAGE}
+    pull_policy: ${BBOX_PULL_POLICY}
     container_name: bbox
     restart: unless-stopped
-    ports:
-      - "5000:5000/udp"
-      - "8282:8282/udp"
-      - "8181:8181/tcp"
-      - "3000:3000/tcp"
+    network_mode: "host"
     volumes:
       - ./config.json:/app/config.json:ro
     security_opt:
@@ -87,68 +350,76 @@ services:
       - /tmp:size=64m,noexec,nosuid,nodev
       - /var/log:size=64m,noexec,nosuid,nodev
     pids_limit: 256
-    mem_limit: 1g
-    cpus: "2.0"
+    mem_limit: 512m
+    cpus: "0.5"
     logging:
       driver: json-file
       options:
         max-size: "10m"
 EOF
 
-cat << 'EOF' > config.json
+if [ ! -f "config.json" ]; then
+  BBOX_USER="belabox"
+  BBOX_KEY="belabox"
+  if [ "$IS_TTY" = true ]; then
+    echo ""
+    echo "Configuração inicial de autenticação SRTLA (Moblin -> Bbox):"
+    read -r -p "Stream User (padrão: belabox): " IN_BUSER
+    BBOX_USER="${IN_BUSER:-belabox}"
+    read -r -p "Stream Key/Auth (padrão: belabox): " IN_BKEY
+    BBOX_KEY="${IN_BKEY:-belabox}"
+  fi
+  cat << EOF > config.json
 {
   "auth": [
     {
-      "user": "belabox",
-      "key": "belabox"
+      "user": "${BBOX_USER}",
+      "key": "${BBOX_KEY}"
     }
   ]
 }
 EOF
-
-# Start Belabox Receiver Docker container
-if command -v docker &> /dev/null; then
-    echo "Starting Belabox Receiver via Docker..."
-    if docker compose version &> /dev/null; then
-        docker compose up -d
-    else
-        docker-compose up -d
-    fi
 fi
 
-# Build and start Oracle Stream Studio
-echo "[6/6] Building and configuring Oracle Stream Studio..."
-
-BUILD_SUCCESS=false
-if [ -f "main.go" ]; then
-    /usr/local/go/bin/go build -o oracle_stream_studio_final .
-    mv oracle_stream_studio_final oracle-stream-studio
-    chmod +x oracle-stream-studio
-    BUILD_SUCCESS=true
+log "Subindo container Bbox (${BBOX_IMAGE})..."
+if docker compose version &>/dev/null; then
+  if [ "$BBOX_PULL_POLICY" = "always" ]; then
+    docker compose pull || true
+  fi
+  docker compose up -d --force-recreate
 else
-    echo "Warning: Source files not found in /opt/oracle-stream-studio. Make sure to copy them before running the service."
+  docker-compose up -d --force-recreate
 fi
 
-# Generate default 60s fallback video in H.265 if it does not exist
-if [ ! -f "fallback.ts" ]; then
-    echo ""
-    echo "⚠️  WARNING: No 'fallback.ts' file found. Generating a default 60s fallback video..."
-    echo "⚠️  This encoding process uses H.265 and may take a few minutes on lower-performance servers (e.g. Oracle Cloud Free Tier). Please wait..."
-    echo ""
-    
-    ffmpeg -y -f lavfi -i color=c=black:s=1920x1080:r=30 -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
-      -c:v libx265 -pix_fmt yuv420p -preset ultrafast -r 30 -g 60 -keyint_min 60 \
-      -x265-params "keyint=60:min-keyint=60:no-scenecut=1" \
-      -c:a aac -b:a 128k -ar 48000 -ac 2 \
-      -shortest -t 60 -f mpegts fallback.ts
-      
-    echo "✅ Default 60-second fallback generated at /opt/oracle-stream-studio/fallback.ts"
+# ------------------------------------------------------------------------------
+# 8. Atualizar Dependências Go, Compilar Binário Enxuto & Configurar Systemd
+# ------------------------------------------------------------------------------
+log "[7/7] Compilando Oracle Stream Studio v2.0..."
+
+UPD_GO_DEPS="$(ask_choice "Atualizar bibliotecas Go (go.mod) para as versões mais recentes? (s/n)" "s")"
+if [[ "$UPD_GO_DEPS" =~ ^[sSyY] ]]; then
+  log "Atualizando dependências Go (gorilla/websocket, go-zeromq/zmq4)..."
+  /usr/local/go/bin/go get -u ./... || warn "Aviso ao atualizar dependências; mantendo versões do go.mod."
+fi
+/usr/local/go/bin/go mod tidy
+
+# Compila com -ldflags="-s -w" para gerar binário mais leve e rápido em RAM
+/usr/local/go/bin/go build -ldflags="-s -w" -o oracle_stream_studio_new .
+mv oracle_stream_studio_new oracle-stream-studio
+chmod +x oracle-stream-studio
+
+# Tuning opcional de Kernel (TCP BBR + Buffers UDP de 16MB para evitar perda no SRTLA)
+if [ -f "scripts/optimize_kernel.sh" ]; then
+  APPLY_KERNEL="$(ask_choice "Aplicar otimizações de Kernel p/ streaming (TCP BBR + Buffers UDP 16MB)? (s/n)" "s")"
+  if [[ "$APPLY_KERNEL" =~ ^[sSyY] ]]; then
+    bash scripts/optimize_kernel.sh || warn "Alguns parâmetros sysctl foram ignorados pelo kernel atual."
+  fi
 fi
 
-# Create systemd service
-cat << 'EOF' > /etc/systemd/system/oracle-stream-studio.service
+# Nota: EOF sem aspas para expandir corretamente WEB_USER e WEB_PASS no systemd!
+cat << EOF > /etc/systemd/system/oracle-stream-studio.service
 [Unit]
-Description=Oracle Stream Studio Server
+Description=Oracle Stream Studio v2.0 (Ultra-Light 2-OCPU Edition)
 After=network.target docker.service
 Wants=docker.service
 
@@ -156,11 +427,13 @@ Wants=docker.service
 Type=simple
 User=root
 WorkingDirectory=/opt/oracle-stream-studio
+Environment="PATH=/usr/local/bin:/usr/local/go/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="WEB_USER=${WEB_USER}"
 Environment="WEB_PASS=${WEB_PASS}"
+LimitNOFILE=65536
 ExecStart=/opt/oracle-stream-studio/oracle-stream-studio --port 80
 Restart=on-failure
-RestartSec=5
+RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
@@ -168,18 +441,20 @@ EOF
 
 systemctl daemon-reload
 systemctl enable oracle-stream-studio
+systemctl restart oracle-stream-studio
 
-if [ "$BUILD_SUCCESS" = true ]; then
-    echo "Starting Oracle Stream Studio service..."
-    systemctl start oracle-stream-studio
-fi
-
-echo "==========================================="
-echo " Installation Complete!"
-echo " "
-echo " Next steps:"
-echo " 1. Web UI is now running on port 80."
-echo " 2. Belabox Receiver is running in Docker (UDP ports 5000 and 8282)."
-echo " 3. You can replace /opt/oracle-stream-studio/fallback.ts with your own fallback video."
-echo " 4. Service commands: sudo systemctl status/start/stop oracle-stream-studio"
-echo "==========================================="
+echo ""
+echo -e "${GREEN}================================================================${NC}"
+echo -e "${GREEN} ✅ Instalação / Atualização Concluída com Sucesso! (v2.0)      ${NC}"
+echo -e "${GREEN}================================================================${NC}"
+echo " • Arquitetura:  ${RAW_ARCH} (Otimizado p/ Oracle Free Tier 2 OCPU / 12 GB)"
+echo " • Go:           $(/usr/local/go/bin/go version | awk '{print $3}')"
+echo " • FFmpeg:       $(ffmpeg -version | head -n1 | awk '{print $1, $2, $3}')"
+echo " • Bbox Image:   ${BBOX_IMAGE} (network_mode: host)"
+echo " • Painel Web:   http://SEU_IP_ORACLE (Login: ${WEB_USER})"
+echo ""
+echo " Dicas importantes:"
+echo " 1. Suba sua imagem .jpg/.png de fallback direto pelo card 'Cena de Fallback' no Painel!"
+echo " 2. Libere na Security List da Oracle Cloud apenas: TCP 80 (ou 443) e UDP 5000 (SRTLA)."
+echo " 3. Para atualizar tudo no futuro: sudo bash /opt/oracle-stream-studio/scripts/update.sh"
+echo -e "${GREEN}================================================================${NC}"
